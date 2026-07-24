@@ -213,9 +213,9 @@ def backtest(df_draws: pd.DataFrame, cfg, out_dir: str):
     print("📊 Lancement du Backtesting Réel Dynamique...")
     total_spent = 0.0
     total_gains = 0.0
-    splits_count = 10
+    splits_count = 20
     ticket_cost = 2.50
-    grilles_per_draw = 6
+    grilles_per_draw = getattr(cfg, 'n_tickets', 6)
 
     max_idx = df_draws["draw_idx"].max()
     num_params = getattr(cfg, "lgb_ranker_params", None)
@@ -261,7 +261,7 @@ def backtest(df_draws: pd.DataFrame, cfg, out_dir: str):
 
         split_gains = 0.0
         all_pool_nums = list(range(1, 51))
-        for ticket_id in range(1, 7):
+        for ticket_id in range(1, grilles_per_draw + 1):
             np.random.seed(42 + ticket_id + i)
             selected_nums = sorted(list(set(pred_top5[:2] + list(np.random.choice([n for n in all_pool_nums if n not in pred_top5], 3, replace=False)))))
             selected_stars = sorted(list(np.random.choice(range(1, 13), 2, replace=False)))
@@ -321,9 +321,10 @@ def run_pipeline(csv_path: str, out_dir: str, cfg) -> dict:
         top2_stars = [4, 8]
 
     # =====================================================================
-    # 3. APPROCHE MONTE CARLO : 200 GRILLES CANDIDATES + SÉLECTION GREEDY MAX-COVERAGE
+    # 3. APPROCHE MONTE CARLO : GRILLES CANDIDATES + SÉLECTION GREEDY MAX-COVERAGE
     # =====================================================================
-    print("🎲 Génération de 200 grilles candidates (Monte Carlo) et sélection optimale...")
+    n_tickets = getattr(cfg, 'n_tickets', 6)
+    print(f"🎲 Génération de 200 grilles candidates (Monte Carlo) et sélection optimale ({n_tickets} grilles)...")
     
     candidate_pool = []
     np.random.seed(999)
@@ -362,14 +363,14 @@ def run_pipeline(csv_path: str, out_dir: str, cfg) -> dict:
             "score": final_grid_score
         })
 
-    # Sélection Greedy Max-Coverage (Sélection des 6 grilles les plus performantes et complémentaires)
+    # Sélection Greedy Max-Coverage (Sélection des N grilles les plus performantes et complémentaires)
     selected_grids = []
     covered_numbers = set()
     
     # Tri des candidats par score IA décroissant
     candidate_pool.sort(key=lambda x: x["score"], reverse=True)
 
-    for _ in range(6):
+    for _ in range(n_tickets):
         if not candidate_pool:
             break
             
@@ -406,7 +407,7 @@ def run_pipeline(csv_path: str, out_dir: str, cfg) -> dict:
         })
     
     df_port = pd.DataFrame(portfolio_data)
-    portfolio_csv = os.path.join(out_dir, "portfolio_7_tickets.csv")
+    portfolio_csv = os.path.join(out_dir, f"portfolio_{n_tickets}_tickets.csv")
     df_port.to_csv(portfolio_csv, index=False)
 
     return {
