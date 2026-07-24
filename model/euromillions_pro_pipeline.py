@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-EuroMillions Pro — Pipeline ML Optimisé (LightGBM + Isotone + Backtest + Portfolio)
-Version optimisée + nettoyée + accélérée + fix crash LightGBM C++
-Compatible MVC + Rich
+EuroMillions Pro — Pipeline ML Optimisé (LightGBM + Random Forest + Gaps Avancés + Backtest Financier)
+Architecture MVC Propre & Haute Performance
 """
 
 # ================================
 # 📦 IMPORTS OPTIMISÉS
 # ================================
 import gc
-import json
 import sys
-from dataclasses import dataclass
 from math import log2
 from pathlib import Path
 
@@ -19,139 +16,20 @@ import lightgbm as lgb
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.isotonic import IsotonicRegression
 from sklearn.model_selection import TimeSeriesSplit
 from tqdm import tqdm
 
-# Ajoute le dossier racine du projet au chemin de recherche de Python
+# Ajoute le dossier racine au path
 root_path = Path(__file__).resolve().parent.parent
 if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path))
 
+from config import Config
 from utils.cache_manager import CacheManager
 
 cache = CacheManager()
-
-
-# ================================
-# 🎛 CONFIGURATION GLOBALE
-# ================================
-@dataclass
-class Config:
-    # Pools
-    pool_numbers: int = 50
-    pool_stars: int = 12
-
-    # Historique minimum
-    min_history_draws: int = 300
-    allow_older_regimes: bool = False
-
-    # GPU LightGBM
-    gpu_try: bool = False
-    random_state: int = 123
-
-    # Fenêtres multi-échelles
-    windows_numbers: tuple[int, ...] = (180, 360, 720)
-    windows_stars: tuple[int, ...] = (90, 180, 360)
-
-    # Fusion Ranker + Classifier
-    ranker_weight_numbers: float = 0.65
-    classifier_weight_numbers: float = 0.35
-    ranker_weight_stars: float = 0.80
-    classifier_weight_stars: float = 0.20
-
-    # Top-K
-    eval_at_numbers: int = 5
-    eval_at_stars: int = 2
-
-    # Décroissance
-    half_life_numbers: int = 260
-    half_life_stars: int = 130
-
-    # Cooccurrences
-    cooc_half_life_numbers: int = 200
-    cooc_half_life_stars: int = 120
-    cooc_topk: int = 3
-
-    # OOF splits
-    oof_splits_numbers: int = 6
-    oof_splits_stars: int = 6
-
-    # Backtest
-    n_splits_backtest: int = 20
-
-    # Portfolio
-    sampling_alpha_numbers: float = 0.80
-    sampling_alpha_stars: float = 0.85
-    n_tickets: int = 7
-    portfolio_max_attempts: int = 1000
-
-    # Paramètres LightGBM optimisés
-    lgb_ranker_params_numbers: dict | None = None
-    lgb_ranker_params_stars: dict | None = None
-    lgb_classifier_params_numbers: dict | None = None
-    lgb_classifier_params_stars: dict | None = None
-
-    def __post_init__(self):
-        # Ranker Numbers
-        self.lgb_ranker_params_numbers = dict(
-            objective="lambdarank",
-            learning_rate=0.05,
-            num_leaves=63,
-            feature_fraction=0.9,
-            bagging_fraction=0.9,
-            bagging_freq=1,
-            min_data_in_leaf=20,
-            n_estimators=400,
-            random_state=self.random_state,
-            verbose=-1,
-            n_jobs=-1,
-        )
-
-        # Ranker Stars
-        self.lgb_ranker_params_stars = dict(
-            objective="lambdarank",
-            learning_rate=0.05,
-            num_leaves=31,
-            min_data_in_leaf=10,
-            feature_fraction=0.9,
-            bagging_fraction=0.9,
-            bagging_freq=1,
-            n_estimators=400,
-            random_state=self.random_state,
-            verbose=-1,
-            n_jobs=-1,
-        )
-
-        # Classifier Numbers
-        self.lgb_classifier_params_numbers = dict(
-            objective="binary",
-            learning_rate=0.05,
-            num_leaves=63,
-            min_data_in_leaf=30,
-            feature_fraction=0.9,
-            bagging_fraction=0.9,
-            bagging_freq=1,
-            n_estimators=500,
-            random_state=self.random_state,
-            verbose=-1,
-            n_jobs=-1,
-        )
-
-        # Classifier Stars
-        self.lgb_classifier_params_stars = dict(
-            objective="binary",
-            learning_rate=0.05,
-            num_leaves=31,
-            min_data_in_leaf=10,
-            feature_fraction=0.9,
-            bagging_fraction=0.9,
-            bagging_freq=1,
-            n_estimators=500,
-            random_state=self.random_state,
-            verbose=-1,
-            n_jobs=-1,
-        )
 
 
 # ================================
@@ -205,7 +83,7 @@ def load_draws(csv_path: str) -> pd.DataFrame:
 
 
 # ================================
-# 🧠 FEATURES OPTIMISÉES
+# 🧠 FEATURES AVANCÉES (Gaps & Cycles)
 # ================================
 def _exp_decay_factor(half_life: int) -> float:
     return 0.5 ** (1.0 / max(1, half_life))
@@ -258,7 +136,7 @@ def _cooc_decay_features(
 # ================================
 def _maybe_gpu(params: dict, cfg: Config) -> dict:
     p = params.copy()
-    if cfg.gpu_try:
+    if hasattr(cfg, "gpu_try") and cfg.gpu_try:
         p["device"] = "gpu"
     return p
 
@@ -277,7 +155,7 @@ def _minmax01(x: np.ndarray) -> np.ndarray:
 
 
 # ================================
-# 🧱 CONSTRUCTION TABLE LONGUE
+# 🧱 CONSTRUCTION TABLE LONGUE + GAPS AVANCÉS
 # ================================
 def build_long_table(
     df_draws: pd.DataFrame, pool: int, kind: str, cfg: Config
@@ -293,9 +171,7 @@ def build_long_table(
 
     n = len(df)
     if n < cfg.min_history_draws:
-        raise ValueError(
-            f"Pas assez de tirages ({n}) pour entraîner ; min={cfg.min_history_draws}."
-        )
+        raise ValueError(f"Pas assez de tirages ({n}) ; min={cfg.min_history_draws}.")
 
     P = _presence_matrix(df, pool, cols)
     Pm1 = np.vstack([np.zeros((1, pool), dtype=np.int8), P[:-1]])
@@ -316,10 +192,29 @@ def build_long_table(
     for s in (10, 25, 50, 100):
         ewma_s[s] = Pdf.ewm(span=s, adjust=False).mean().to_numpy(dtype=np.float32)
 
-    gap = np.full((n, pool), 9999, dtype=np.int16)
-    last = np.full(pool, -(10**9), dtype=np.int32)
+    # ➡️ Utilisation de int32 pour éviter l'overflow des gaps
+    gap = np.full((n, pool), 9999, dtype=np.int32)
+    max_gap = np.zeros((n, pool), dtype=np.int32)
+    gap_mean = np.zeros((n, pool), dtype=np.float32)
+    gap_std = np.zeros((n, pool), dtype=np.float32)
+
+    last = np.full(pool, -1, dtype=np.int32)
+    all_historical_gaps = [[] for _ in range(pool)]
+
     for i in range(n):
-        gap[i] = i - last
+        current_gaps = i - last
+        gap[i] = current_gaps
+
+        for j in range(pool):
+            all_historical_gaps[j].append(current_gaps[j])
+            max_gap[i, j] = int(np.max(all_historical_gaps[j]))
+            gap_mean[i, j] = float(np.mean(all_historical_gaps[j]))
+            gap_std[i, j] = (
+                float(np.std(all_historical_gaps[j]))
+                if len(all_historical_gaps[j]) > 1
+                else 0.0
+            )
+
         idx1 = np.where(Pm1[i] == 1)[0]
         if idx1.size:
             last[idx1] = i
@@ -371,6 +266,9 @@ def build_long_table(
                 "ewma_s50": float(ewma_s[50][i, j]),
                 "ewma_s100": float(ewma_s[100][i, j]),
                 "gap_draws": int(gap[i, j]),
+                "max_gap": int(max_gap[i, j]),
+                "gap_mean": float(gap_mean[i, j]),
+                "gap_std": float(gap_std[i, j]),
                 "streak_5_sum": float(streak5[i, j]),
                 "age_draws": float(age[i, j]),
                 "expdecay": float(Edec[i, j]),
@@ -382,7 +280,7 @@ def build_long_table(
 
 
 # ================================
-# 🏆 TRAINING RANKER (Fix C++ Abort)
+# 🏆 TRAINING RANKER
 # ================================
 def _train_ranker_ensemble(
     long_df: pd.DataFrame,
@@ -423,11 +321,10 @@ def _train_ranker_ensemble(
         )
 
         params_gpu = _maybe_gpu(params, cfg)
-
         try:
             model = lgb.LGBMRanker(**params_gpu)
             model.fit(Xtr, ytr, group=gtr, sample_weight=sw_tr)
-        except Exception:  # noqa: BLE001
+        except Exception:
             model = lgb.LGBMRanker(**params)
             model.fit(Xtr, ytr, group=gtr, sample_weight=sw_tr)
 
@@ -481,10 +378,9 @@ def _train_classifier_oof(
 
         params_gpu = _maybe_gpu(params, cfg)
         clf = lgb.LGBMClassifier(**params_gpu)
-
         try:
             clf.fit(Xtr, ytr, sample_weight=sw_tr)
-        except Exception:  # noqa: BLE001
+        except Exception:
             clf = lgb.LGBMClassifier(**params)
             clf.fit(Xtr, ytr, sample_weight=sw_tr)
 
@@ -500,10 +396,9 @@ def _train_classifier_oof(
 
     params_gpu = _maybe_gpu(params, cfg)
     clf_full = lgb.LGBMClassifier(**params_gpu)
-
     try:
         clf_full.fit(X_all, y_all, sample_weight=sw_all)
-    except Exception:  # noqa: BLE001
+    except Exception:
         clf_full = lgb.LGBMClassifier(**params)
         clf_full.fit(X_all, y_all, sample_weight=sw_all)
 
@@ -511,7 +406,7 @@ def _train_classifier_oof(
 
 
 # ================================
-# 🔮 PREDICTION FUSIONNÉE
+# 🔮 PREDICTION ENSEMBLE FUSIONNÉE
 # ================================
 def _prepare_next(long_df: pd.DataFrame) -> pd.DataFrame:
     feat_cols = [
@@ -550,13 +445,42 @@ def _predict_next_fused(
         if k_eval == cfg.eval_at_numbers
         else cfg.oof_splits_stars
     )
+
     clf_full, iso = _train_classifier_oof(
         long_df, classifier_params, cfg, n_splits=n_splits
     )
+    p_raw_lgb = clf_full.predict_proba(Xnext)[:, 1]
+    p_cal_lgb = iso.transform(p_raw_lgb)
 
-    p_raw = clf_full.predict_proba(Xnext)[:, 1]
-    p_cal = iso.transform(p_raw)
+    feature_cols = [
+        c
+        for c in long_df.columns
+        if c not in ("draw_idx", "date", "entity_id", "label")
+    ]
+    valid_cols = [
+        c
+        for c in feature_cols
+        if not long_df[c].isna().all() and long_df[c].nunique() > 1
+    ]
 
+    X_all_rf = long_df[valid_cols + ["entity_id"]].copy()
+    X_all_rf["entity_id"] = X_all_rf["entity_id"].astype(int)
+    y_all = long_df["label"].astype(int).values
+
+    rf_clf = RandomForestClassifier(
+        n_estimators=150, max_depth=12, min_samples_leaf=5, random_state=42, n_jobs=-1
+    )
+    sw_all = _sample_weights_by_recency(
+        long_df["draw_idx"].values,
+        half_life=int(np.median([cfg.half_life_numbers, cfg.half_life_stars])),
+    )
+    rf_clf.fit(X_all_rf, y_all, sample_weight=sw_all)
+
+    Xnext_rf = Xnext.copy()
+    Xnext_rf["entity_id"] = Xnext_rf["entity_id"].astype(int)
+    p_cal_rf = rf_clf.predict_proba(Xnext_rf[valid_cols + ["entity_id"]])[:, 1]
+
+    p_cal = 0.6 * p_cal_lgb + 0.4 * p_cal_rf
     fused = ranker_weight * rank_score + classifier_weight * p_cal
 
     return (
@@ -564,7 +488,7 @@ def _predict_next_fused(
         .DataFrame({
             "entity_id": Xnext["entity_id"].astype(int).values,
             "rank_score": rank_score,
-            "p_clf_raw": p_raw,
+            "p_clf_raw": p_raw_lgb,
             "p_clf_cal": p_cal,
             "score_fused": fused,
         })
@@ -574,7 +498,7 @@ def _predict_next_fused(
 
 
 # ================================
-# 📊 MÉTRIQUES
+# 📊 MÉTRIQUES & SIMULATION FINANCIÈRE
 # ================================
 def dcg_at_k(rels: list[int], k: int) -> float:
     s = 0.0
@@ -592,6 +516,33 @@ def ndcg_at_k(y_true_binary: np.ndarray, y_scores: np.ndarray, k: int) -> float:
     idcg = dcg_at_k(ideal_rels, k)
 
     return 0.0 if idcg == 0 else dcg / idcg
+
+
+def simulate_financial_payout(
+    ticket_nums: list[int],
+    ticket_stars: list[int],
+    actual_nums: list[int],
+    actual_stars: list[int],
+) -> float:
+    matched_nums = len(set(ticket_nums).intersection(set(actual_nums)))
+    matched_stars = len(set(ticket_stars).intersection(set(actual_stars)))
+
+    payouts = {
+        (5, 2): 50000000.0,
+        (5, 1): 403987.0,
+        (5, 0): 43973.0,
+        (4, 2): 2067.0,
+        (4, 1): 138.0,
+        (3, 2): 74.0,
+        (4, 0): 46.0,
+        (2, 2): 16.0,
+        (3, 1): 12.0,
+        (3, 0): 10.0,
+        (1, 2): 7.88,
+        (2, 1): 6.25,
+        (2, 0): 4.08,
+    }
+    return payouts.get((matched_nums, matched_stars), 0.0)
 
 
 # ================================
@@ -680,29 +631,25 @@ def make_portfolio(
 
 
 # ================================
-# 🔍 BACKTEST
+# 🔍 BACKTEST + SIMULATION FINANCIÈRE
 # ================================
-def backtest(
-    df_draws: pd.DataFrame, cfg: Config | None = None, out_dir: str | None = None
-) -> pd.DataFrame:
-    cfg = cfg or Config()
-    cfg.n_splits_backtest = 10
+def backtest(df_draws: pd.DataFrame, cfg: Config, out_dir: str):
+    n_splits_backtest = getattr(cfg, "n_splits_backtest", 20)
 
-    out = Path(out_dir) if out_dir else None
-    if out:
-        out.mkdir(parents=True, exist_ok=True)
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
 
-    print("🚀 Pré-calcul des tables de features...")
+    print("🚀 Pré-calcul des tables de features (avec Gaps Avancés)...")
 
     dataset_hash = cache.hash_dataset(df_draws)
     params_hash = cache.hash_params(cfg)
     code_hash = cache.hash_code(build_long_table)
 
     cache_key_num = cache.make_cache_key(
-        dataset_hash, params_hash, code_hash, "long_numbers"
+        dataset_hash, params_hash, code_hash, "long_numbers_v2"
     )
     cache_key_star = cache.make_cache_key(
-        dataset_hash, params_hash, code_hash, "long_stars"
+        dataset_hash, params_hash, code_hash, "long_stars_v2"
     )
 
     long_num = cache.load(cache_key_num)
@@ -718,11 +665,14 @@ def backtest(
 
     last_idx = int(min(long_num["draw_idx"].max(), long_star["draw_idx"].max()))
     split_points = np.linspace(
-        cfg.min_history_draws, last_idx - 1, cfg.n_splits_backtest, dtype=int
+        cfg.min_history_draws, last_idx - 1, n_splits_backtest, dtype=int
     )
 
     rows = []
-    print("\n📊 Lancement du Backtesting (optimisé)...")
+    total_spent = 0.0
+    total_winnings = 0.0
+
+    print("\n📊 Lancement du Backtesting (NDCG + Simulation Financière)...")
 
     for sp in tqdm(split_points, desc="Backtest", unit="split"):
         tr_num = long_num[long_num["draw_idx"] <= sp].copy()
@@ -765,11 +715,25 @@ def backtest(
         ndcg_num = ndcg_at_k(y_true_num, y_score_num, cfg.eval_at_numbers)
         ndcg_star = ndcg_at_k(y_true_star, y_score_star, cfg.eval_at_stars)
 
+        actual_winning_nums = te_num[te_num["label"] == 1]["entity_id"].tolist()
+        actual_winning_stars = te_star[te_star["label"] == 1]["entity_id"].tolist()
+
+        portfolio_tickets = make_portfolio(pred_num, pred_star, cfg, seed=int(sp))
+        split_winnings = 0.0
+        for t_nums, t_stars in portfolio_tickets:
+            total_spent += 2.50
+            split_winnings += simulate_financial_payout(
+                t_nums, t_stars, actual_winning_nums, actual_winning_stars
+            )
+
+        total_winnings += split_winnings
+
         rows.append({
             "train_upto_idx": int(sp),
             "test_idx": int(sp + 1),
             "ndcg_numbers": float(ndcg_num),
             "ndcg_stars": float(ndcg_star),
+            "split_winnings_eur": float(split_winnings),
         })
 
         del pred_num, pred_star, tr_num, te_num, tr_star, te_star
@@ -777,22 +741,29 @@ def backtest(
 
     res = pd.DataFrame(rows)
 
+    print(f"\n💰 Bilan Financier Virtuel du Backtest :")
+    print(
+        f"   - Total dépensé ({int(total_spent / 2.5)} grilles) : {total_spent:.2f} €"
+    )
+    print(f"   - Total gains simulés : {total_winnings:.2f} €")
+    print(f"   - Bilan Net : {total_winnings - total_spent:.2f} €\n")
+
     if out:
         res.to_csv(out / "backtest_results.csv", index=False)
         try:
             _plot_line(
                 res["test_idx"].values,
                 res["ndcg_numbers"].values,
-                "NDCG@5 — Numéros",
-                "Index de tirage test",
+                "NDCG@5 — Numéros (Gaps & Ensemble)",
+                "Index test",
                 "NDCG@5",
                 out / "ndcg_numbers.png",
             )
             _plot_line(
                 res["test_idx"].values,
                 res["ndcg_stars"].values,
-                "NDCG@2 — Étoiles",
-                "Index de tirage test",
+                "NDCG@2 — Étoiles (Gaps & Ensemble)",
+                "Index test",
                 "NDCG@2",
                 out / "ndcg_stars.png",
             )
@@ -805,18 +776,16 @@ def backtest(
 # ================================
 # 🚀 TRAIN + PREDICT FINAL
 # ================================
-def train_and_predict_for_next(df_draws: pd.DataFrame, cfg: Config | None = None):
-    cfg = cfg or Config()
-
+def train_and_predict_for_next(df_draws: pd.DataFrame, cfg: Config):
     dataset_hash = cache.hash_dataset(df_draws)
     params_hash = cache.hash_params(cfg)
     code_hash = cache.hash_code(build_long_table)
 
     cache_key_num = cache.make_cache_key(
-        dataset_hash, params_hash, code_hash, "long_numbers"
+        dataset_hash, params_hash, code_hash, "long_numbers_v2"
     )
     cache_key_star = cache.make_cache_key(
-        dataset_hash, params_hash, code_hash, "long_stars"
+        dataset_hash, params_hash, code_hash, "long_stars_v2"
     )
 
     long_num = cache.load(cache_key_num)
@@ -871,31 +840,13 @@ def train_and_predict_for_next(df_draws: pd.DataFrame, cfg: Config | None = None
 
 
 # ================================
-# 🧪 CLI PRINCIPALE
+# 🧪 POINT D'ENTRÉE DU PIPELINE
 # ================================
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="EuroMillions Pro — Pipeline ML Optimisé"
-    )
-    parser.add_argument(
-        "--csv", type=str, default="euromillions.csv", help="CSV source"
-    )
-    parser.add_argument(
-        "--out", type=str, default="resultats_euromillions", help="Dossier résultats"
-    )
-    parser.add_argument("--gpu", action="store_true", help="Activer GPU LightGBM")
-    parser.add_argument("--no-gpu", action="store_true", help="Désactiver GPU LightGBM")
-    args = parser.parse_args()
-
-    gpu_try = not args.no_gpu
-    cfg = Config(gpu_try=gpu_try)
-
-    df = load_draws(args.csv)
+def run_pipeline(csv_path: str, out_dir: str, cfg: Config) -> dict:
+    df = load_draws(csv_path)
 
     print("\n📊 Backtest en cours...")
-    res = backtest(df, cfg, out_dir=args.out)
+    backtest(df, cfg, out_dir=out_dir)
 
     print("\n🔮 Entraînement final sur l'historique complet...")
     out_pred = train_and_predict_for_next(df, cfg)
@@ -908,12 +859,13 @@ def main():
 
     portfolio = make_portfolio(pred_num, pred_star, cfg, seed=123)
 
-    Path(args.out).mkdir(parents=True, exist_ok=True)
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
 
-    pred_num.to_csv(Path(args.out) / "pred_numbers_next.csv", index=False)
-    pred_star.to_csv(Path(args.out) / "pred_stars_next.csv", index=False)
+    pred_num.to_csv(out_path / "pred_numbers_next.csv", index=False)
+    pred_star.to_csv(out_path / "pred_stars_next.csv", index=False)
 
-    with open(Path(args.out) / "portfolio_7_tickets.txt", "w") as f:
+    with open(out_path / "portfolio_7_tickets.txt", "w") as f:
         for i, (nums, stars) in enumerate(portfolio, 1):
             f.write(f"Ticket {i:02d}: N {nums} | S {stars}\n")
 
@@ -926,24 +878,16 @@ def main():
             row[f"s{k}"] = v
         port_rows.append(row)
 
-    pd.DataFrame(port_rows).to_csv(
-        Path(args.out) / "portfolio_7_tickets.csv", index=False
-    )
+    portfolio_csv = out_path / "portfolio_7_tickets.csv"
+    pd.DataFrame(port_rows).to_csv(portfolio_csv, index=False)
 
-    print("\n✅ Analyse terminée avec succès !")
-    print(
-        json.dumps(
-            {
-                "backtest_csv": str(Path(args.out) / "backtest_results.csv"),
-                "top5_numbers": top5_numbers,
-                "top2_stars": top2_stars,
-                "portfolio_txt": str(Path(args.out) / "portfolio_7_tickets.txt"),
-                "portfolio_csv": str(Path(args.out) / "portfolio_7_tickets.csv"),
-            },
-            indent=2,
-        )
-    )
+    return {
+        "top5_numbers": top5_numbers,
+        "top2_stars": top2_stars,
+        "portfolio_csv": str(portfolio_csv),
+    }
 
 
 if __name__ == "__main__":
-    main()
+    cfg = Config()
+    run_pipeline("euromillions.csv", "resultats_euromillions", cfg)

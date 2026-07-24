@@ -1,68 +1,86 @@
-#!/usr/bin/env python3
 """
-Contrôleur (MVC) - Orchestration du pipeline de données et d'IA (LightGBM)
-Version épurée Pure ML
+Contrôleur (MVC) - Orchestrateur EuroMillions avec Apprentissage Continu
 """
-import sys
-import os
+
 import pandas as pd
 
-# Sécurité pour s'assurer que le dossier racine est dans le PYTHONPATH
-root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "."))
-if root_path not in sys.path:
-    sys.path.insert(0, root_path)
-
-from model.data_manager import DataManager
+from config import Config
+from continuous_learning import ContinuousLearningEngine
+from model.euromillions_pro_pipeline import (
+    build_long_table,
+    load_draws,
+    run_pipeline,
+)
 from view.terminal_view import TerminalView
-import view.euromillions_pro_pipeline as euromillions_pro_pipeline
+
 
 class MainController:
     def __init__(self):
-        self.model = DataManager()
+        """Initialise le Modèle, la Vue et la Configuration."""
+        self.cfg = Config()
+        self.cl_engine = ContinuousLearningEngine()
         self.view = TerminalView()
-        self.output_dir = "resultats_euromillions"
 
-    def run_application(self):
-        """Exécute l'application de bout en bout (pipeline ML)."""
+    def run(self):
+        """Exécute le pipeline complet du programme."""
         self.view.display_header()
-        
-        # Le rafraîchissement initial et la synchronisation étant gérés dans run.py,
-        # nous lançons immédiatement l'entraînement et l'analyse prédictive.
-        self.view.display_status("Exécution du pipeline d'IA (LightGBM Optimizer) sur l'historique global...", "info")
-        
-        # Simulation d'arguments CLI pour alimenter proprement le pipeline d'IA sans os.system
-        original_argv = sys.argv.copy()
-        sys.argv = [
-            "euromillions_pro_pipeline.py",
-            "--csv", self.model.csv_path,
-            "--out", self.output_dir
-        ]
-        
-        try:
-            # Appel direct de la fonction principale du pipeline ML
-            euromillions_pro_pipeline.main()
-            self.view.display_status("Calculs prédictifs, backtesting et filtrage géométrique terminés avec succès.", "success")
-            print("-" * 60)
-        except Exception as e:
-            self.view.display_status(f"Erreur critique dans le moteur d'IA : {e}", "error")
-            return
-        finally:
-            # Restauration systématique des arguments initiaux du système
-            sys.argv = original_argv
+        self.view.display_status("Chargement et synchronisation des données...", "info")
 
-        portfolio_csv = os.path.join(self.output_dir, "portfolio_7_tickets.csv")
-        
-        # Récupération et chargement des résultats générés par LightGBM pour l'affichage final
-        try:
-            df_nums = pd.read_csv(os.path.join(self.output_dir, "pred_numbers_next.csv"))
-            df_stars = pd.read_csv(os.path.join(self.output_dir, "pred_stars_next.csv"))
-            
-            # Extraction des favoris absolus (Top des scores calibrés par l'Isotone Regression)
-            top5_nums = df_nums.sort_values(by="score_fused", ascending=False).head(5)["entity_id"].tolist()
-            top2_stars = df_stars.sort_values(by="score_fused", ascending=False).head(2)["entity_id"].tolist()
-            
-            # Transmission à la vue pour affichage du tableau de bord Rich
-            self.view.display_dashboard(top5_nums, top2_stars, portfolio_csv)
-            
-        except Exception as e:
-            self.view.display_status(f"Erreur lors de la récupération des résultats pour affichage : {e}", "error")
+        df_draws = load_draws("euromillions.csv")
+
+        # 1. ÉVALUATION AUTOMATIQUE DU TIRAGE DE LA SEMAINE
+        self.view.display_status("Vérification des prédictions passées...", "info")
+        self.cl_engine.evaluate_past_predictions(df_draws)
+
+        # 2. CONTRÔLE DE LA DÉRIVE DE CONCEPT (Drift Tracking)
+        is_drifted = self.cl_engine.check_concept_drift(threshold_ndcg=0.35)
+
+        if is_drifted:
+            self.view.display_status(
+                "Dérive détectée. Ré-optimisation des hyperparamètres en cours...",
+                "warning",
+            )
+            long_num = build_long_table(
+                df_draws, self.cfg.pool_numbers, "number", self.cfg
+            )
+            X = long_num.drop(columns=["draw_idx", "date", "entity_id", "label"])
+            y = long_num["label"].values
+
+            new_params = self.cl_engine.run_optuna_retuning(X, y, kind="numbers")
+            if new_params:
+                self.cfg.lgb_classifier_params_numbers.update(new_params)
+
+        # 3. APPRENTISSAGE INCRÉMENTAL (Warm Start) ET GÉNÉRATION
+        self.view.display_status("Exécution du pipeline prédictif...", "info")
+        results = run_pipeline("euromillions.csv", "resultats_euromillions", self.cfg)
+
+        # 4. JOURNALISATION DE LA NOUVELLE PRÉDICTION
+        next_date = (df_draws["date"].max() + pd.Timedelta(days=3)).strftime("%Y-%m-%d")
+
+        portfolio_data = []
+        df_port = pd.read_csv(results["portfolio_csv"])
+        for _, row in df_port.iterrows():
+            portfolio_data.append({
+                "nums": [int(row[f"n{k}"]) for k in range(1, 6)],
+                "stars": [int(row[f"s{k}"]) for k in range(1, 3)],
+            })
+
+        self.cl_engine.log_prediction(
+            target_draw_date=next_date,
+            top_nums=results["top5_numbers"],
+            top_stars=results["top2_stars"],
+            portfolio=portfolio_data,
+        )
+
+        # ==========================================
+        # 5. AFFICHAGE DU TABLEAU DE BORD (Via la Vue MVC)
+        # ==========================================
+        self.view.display_dashboard(
+            top_numbers=results["top5_numbers"],
+            top_stars=results["top2_stars"],
+            portfolio_path=results["portfolio_csv"],
+        )
+
+        self.view.display_status(
+            "Processus d'apprentissage continu terminé avec succès !", "success"
+        )
