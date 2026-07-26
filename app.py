@@ -5,8 +5,8 @@ Application Web Streamlit - EuroMillions Pro IA
 import os
 import streamlit as st
 import pandas as pd
-from config import Config  # ✅ Import de la configuration centrale
 from model.euromillions_pro_pipeline import run_pipeline
+from model.data_manager import DataManager
 
 # Configuration de la page
 st.set_page_config(
@@ -40,26 +40,39 @@ st.sidebar.text(f"Fichier cible :\n{os.path.basename(csv_file)}")
 
 output_dir = st.sidebar.text_input("Dossier de sortie", "output")
 
-# Instanciation de la configuration pour récupérer le défaut (ex: 7)
-default_cfg = Config()
+# Curseur pour choisir le nombre de grilles à générer
+nb_grilles = st.sidebar.slider("Nombre de grilles à générer", min_value=1, max_value=20, value=6, step=1)
 
-# Curseur pour choisir le nombre de grilles (valeur par défaut alignée sur config.py)
-nb_grilles = st.sidebar.slider("Nombre de grilles à générer", min_value=1, max_value=20, value=default_cfg.n_tickets, step=1)
+class Config:
+    def __init__(self, n_tickets):
+        self.pool_numbers = 50
+        self.pool_stars = 12
+        self.n_tickets = n_tickets
+        self.num_tickets = n_tickets
 
 if st.sidebar.button("🚀 Lancer l'Analyse & Générer les Grilles", type="primary"):
     if not os.path.exists(csv_file):
         st.error(f"❌ Le fichier est introuvable à l'emplacement : `{csv_file}`. Veuillez vérifier son nom exact.")
     else:
+        # 1. Synchronisation automatique du CSV avec le site web
+        with st.spinner("🔄 Synchronisation des derniers tirages en ligne..."):
+            try:
+                dm = DataManager(csv_path=csv_file)
+                sync_result = dm.synchronize_database()
+                if sync_result["status"] == "success":
+                    st.toast(f"✅ CSV mis à jour : {sync_result['added']} nouveau(x) tirage(s) ajouté(s) !", icon="🎉")
+                elif sync_result["status"] == "up_to_date":
+                    st.toast("ℹ️ Le fichier CSV est déjà à jour.", icon="📌")
+            except Exception as sync_err:
+                st.warning(f"⚠️ Avertissement synchronisation : {sync_err}")
+
+        # 2. Entraînement et génération
         with st.spinner("🔄 Entraînement des modèles et optimisation Monte Carlo en cours..."):
             try:
-                # Mise à jour dynamique du nombre de tickets dans la configuration
-                default_cfg.n_tickets = nb_grilles
-                default_cfg.num_tickets = nb_grilles
-                
-                results = run_pipeline(csv_file, output_dir, default_cfg)
+                results = run_pipeline(csv_file, output_dir, Config(nb_grilles))
                 st.success("✅ Génération des grilles réussie avec succès !")
                 
-                # 1. Affichage du Top IA
+                # Affichage du Top IA
                 st.subheader("🔮 Top National Individuel (Recommandations IA)")
                 col1, col2 = st.columns(2)
                 
@@ -75,7 +88,7 @@ if st.sidebar.button("🚀 Lancer l'Analyse & Générer les Grilles", type="prim
 
                 st.markdown("---")
 
-                # 2. Affichage du Portefeuille de Couverture Optimisé avec encadrés
+                # Affichage du Portefeuille de Couverture Optimisé
                 st.subheader(f"🟢 Portefeuille de Couverture Optimisé ({nb_grilles} grilles)")
                 df_port = pd.read_csv(results["portfolio_csv"])
                 
@@ -99,7 +112,7 @@ if st.sidebar.button("🚀 Lancer l'Analyse & Générer les Grilles", type="prim
                 
                 st.markdown("---")
 
-                # 3. Bouton de téléchargement du CSV
+                # Bouton de téléchargement du CSV
                 with open(results["portfolio_csv"], "rb") as f:
                     st.download_button(
                         label="📥 Télécharger le fichier CSV des grilles",
@@ -108,7 +121,7 @@ if st.sidebar.button("🚀 Lancer l'Analyse & Générer les Grilles", type="prim
                         mime="text/csv"
                     )
 
-                # 4. Graphiques Statistiques robustes
+                # Graphiques Statistiques robustes
                 st.markdown("---")
                 st.subheader("📊 Analyses Statistiques & Tendances Historiques")
                 
