@@ -33,10 +33,9 @@ class Config:
     eval_at_numbers: int = 5
     eval_at_stars: int = 2
 
-    # --- Échantillonnage (Gumbel-Top-K) & Portefeuille ---
+    # --- Échantillonnage & Portefeuille ---
     sampling_alpha_numbers: float = 0.5
     sampling_alpha_stars: float = 0.5
-    n_tickets: int = 7
     portfolio_max_attempts: int = 5000
 
     # --- LightGBM ranker (ML optimisé CPU) ---

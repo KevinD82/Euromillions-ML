@@ -124,7 +124,7 @@ class TerminalView:
             df_port = pd.read_csv(path_obj)
 
             table_port = Table(
-                title="🎟️ [bold bright_green]Portefeuille de Couverture Optimisé (Filtre Géométrique & Étalement)[/bold bright_green]",
+                title="🎟️ [bold bright_green]Portefeuille: 5 grilles IA + 1 grille combinée[/bold bright_green]",
                 title_justify="left",
                 border_style="bright_green",
                 header_style="bold bright_white on dark_green",
@@ -148,9 +148,9 @@ class TerminalView:
                 )
                 stars_str = f"[bright_red]★ {stars_list[0]:02d}[/bright_red]   [bright_red]★ {stars_list[1]:02d}[/bright_red]"
 
-                table_port.add_row(
-                    f"Grille #{int(row['ticket']):02d}", nums_str, stars_str
-                )
+                ticket_id = int(row["ticket"])
+                label = "Combinée" if ticket_id == 6 else f"IA #{ticket_id:02d}"
+                table_port.add_row(label, nums_str, stars_str)
 
             self.console.print(table_port)
             self.console.print()
