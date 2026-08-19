@@ -3,10 +3,12 @@ Application Web Streamlit - EuroMillions Pro IA
 """
 
 import os
-import streamlit as st
+
 import pandas as pd
-from model.euromillions_pro_pipeline import run_pipeline
+import streamlit as st
+
 from model.data_manager import DataManager
+from model.euromillions_pro_pipeline import run_pipeline
 
 # Configuration de la page
 st.set_page_config(page_title="EuroMillions Pro IA", page_icon="🎰", layout="wide")

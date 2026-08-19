@@ -3,9 +3,10 @@
 Modèle (MVC) - Gestion de la base de données et scraping
 """
 
+import datetime
 import os
 import re
-import datetime
+
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup

@@ -3,15 +3,15 @@ Pipeline Prédictif EuroMillions Pro IA - Version Monte Carlo & Couverture Maxim
 """
 
 import os
-from pathlib import Path
 import warnings
+from pathlib import Path
 
 import catboost as cb
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 import xgboost as xgb
+from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
