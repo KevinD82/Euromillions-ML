@@ -188,3 +188,5 @@ resultats_euromillions/
 
 # Dossier de sauvegarde des modèles d'IA entraînés (si créé par le pipeline)
 models/
+
+Euromillions-ML/cache/
