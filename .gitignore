@@ -180,9 +180,6 @@ cython_debug/
 # Dossier contenant les fichiers CSV d'origine par année
 CSV/
 
-# Fichier global d'historique fusionné
-euromillions.csv
-
 # Dossier des résultats générés par LightGBM (portefeuilles, graphiques, predictions)
 resultats_euromillions/
 
