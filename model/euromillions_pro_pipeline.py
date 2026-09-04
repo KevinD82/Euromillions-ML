@@ -1,587 +1,620 @@
 """
-Pipeline Prédictif EuroMillions Pro IA - Version Monte Carlo & Couverture Maximale (Covering Design)
+Pipeline EuroMillions avec apprentissage CatBoost.
+
+Le modèle apprend uniquement à partir des tirages antérieurs à la cible.
+Aucune méthode ne peut garantir les numéros gagnants.
 """
 
-import os
-import warnings
 from pathlib import Path
 
-import catboost as cb
-import lightgbm as lgb
 import numpy as np
 import pandas as pd
-import xgboost as xgb
+from catboost import CatBoostClassifier
 from tqdm import tqdm
 
-warnings.filterwarnings("ignore")
+FEATURES = [
+    "entity_id",
+    "draw_index",
+    "delay",
+    "freq_5",
+    "freq_10",
+    "freq_25",
+    "freq_50",
+    "freq_all",
+    "recent_weighted",
+]
 
-GENERATED_TICKETS = 5
-TOTAL_TICKETS = GENERATED_TICKETS + 1
-
-# =====================================================================
-# 1. GRILLE OFFICIELLE DES GAINS EUROMILLIONS (13 RANGS)
-# =====================================================================
+PAYOUTS = {
+    (5, 2): 50_000_000.0,
+    (5, 1): 250_000.0,
+    (5, 0): 35_000.0,
+    (4, 2): 1_500.0,
+    (4, 1): 150.0,
+    (4, 0): 60.0,
+    (3, 2): 20.0,
+    (2, 2): 15.0,
+    (3, 1): 12.0,
+    (3, 0): 10.0,
+    (1, 2): 8.0,
+    (2, 1): 6.0,
+    (2, 0): 4.0,
+}
 
 
 def compute_official_euromillions_payout(
-    matched_nums: int, matched_stars: int
+    matched_nums: int,
+    matched_stars: int,
 ) -> float:
-    """Renvoie le gain estimé (en euros) selon les 13 rangs officiels de l'Euromillions."""
-    payouts = {
-        (5, 2): 50_000_000.0,
-        (5, 1): 250_000.0,
-        (5, 0): 35_000.0,
-        (4, 2): 1_500.0,
-        (4, 1): 150.0,
-        (4, 0): 60.0,
-        (3, 2): 20.0,
-        (2, 2): 15.0,
-        (3, 1): 12.0,
-        (3, 0): 10.0,
-        (1, 2): 8.0,
-        (2, 1): 6.0,
-        (2, 0): 4.0,
-    }
-    return payouts.get((matched_nums, matched_stars), 0.0)
+    return PAYOUTS.get((matched_nums, matched_stars), 0.0)
 
 
-# =====================================================================
-# 2. CHARGEMENT ET PRÉPARATION DES DONNÉES
-# =====================================================================
-
-
-def load_draws(csv_path: str) -> pd.DataFrame:
+def load_draws(csv_path: str | Path) -> pd.DataFrame:
+    """Charge et valide l'historique sans le modifier."""
     df = pd.read_csv(csv_path)
 
-    if "date" not in df.columns:
-        possible_date_cols = [
-            "date_de_tirage",
-            "Date",
-            "date_tirage",
-            "jour",
-            "Tirage",
-            "date_of_draw",
-        ]
-        found_col = next((col for col in possible_date_cols if col in df.columns), None)
-        if found_col:
-            df = df.rename(columns={found_col: "date"})
-        else:
-            raise KeyError(
-                f"Impossible de trouver la colonne de date. Colonnes disponibles : {list(df.columns)}"
-            )
-
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.sort_values("date").reset_index(drop=True)
-    df["draw_idx"] = df.index
-
-    num_candidates = [
-        ["n1", "n2", "n3", "n4", "n5"],
-        ["boule_1", "boule_2", "boule_3", "boule_4", "boule_5"],
-        ["boule1", "boule2", "boule3", "boule4", "boule5"],
-        ["num1", "num2", "num3", "num4", "num5"],
-        ["number_1", "number_2", "number_3", "number_4", "number_5"],
-    ]
-
-    found_nums = None
-    for cand in num_candidates:
-        if all(c in df.columns for c in cand):
-            found_nums = cand
-            break
-
-    if found_nums:
-        rename_map = {found_nums[i]: f"n{i + 1}" for i in range(5)}
-        df = df.rename(columns=rename_map)
+    if "date_de_tirage" in df.columns:
+        date_column = "date_de_tirage"
+    elif "date" in df.columns:
+        date_column = "date"
     else:
-        numeric_cols = [
-            c
-            for c in df.columns
-            if pd.api.types.is_numeric_dtype(df[c]) and c != "draw_idx"
-        ]
-        ball_cols = [c for c in numeric_cols if df[c].max() <= 50 and df[c].min() >= 1]
-        if len(ball_cols) >= 5:
-            for i in range(5):
-                df[f"n{i + 1}"] = df[ball_cols[i]]
-        else:
-            raise KeyError("Impossible de détecter les 5 colonnes de numéros.")
+        raise KeyError("Colonne de date introuvable.")
 
-    star_candidates = [
-        ["s1", "s2"],
-        ["etoile_1", "etoile_2"],
-        ["etoile1", "etoile2"],
-        ["star_1", "star_2"],
-        ["star1", "star2"],
+    number_columns = [
+        "boule_1",
+        "boule_2",
+        "boule_3",
+        "boule_4",
+        "boule_5",
     ]
+    star_columns = ["etoile_1", "etoile_2"]
 
-    found_stars = None
-    for cand in star_candidates:
-        if all(c in df.columns for c in cand):
-            found_stars = cand
-            break
+    if not all(column in df.columns for column in number_columns):
+        raise KeyError("Colonnes boule_1 à boule_5 introuvables.")
 
-    if found_stars:
-        rename_map = {found_stars[0]: "s1", found_stars[1]: "s2"}
-        df = df.rename(columns=rename_map)
-    else:
-        numeric_cols = [
-            c
-            for c in df.columns
-            if pd.api.types.is_numeric_dtype(df[c]) and c != "draw_idx"
-        ]
-        star_cols = [
-            c
-            for c in numeric_cols
-            if df[c].max() <= 12
-            and df[c].min() >= 1
-            and c not in [f"n{i}" for i in range(1, 6)]
-        ]
-        if len(star_cols) >= 2:
-            df["s1"] = df[star_cols[0]]
-            df["s2"] = df[star_cols[1]]
-        else:
-            df["s1"] = 1
-            df["s2"] = 2
+    if not all(column in df.columns for column in star_columns):
+        raise KeyError("Colonnes etoile_1 et etoile_2 introuvables.")
 
+    df = df.rename(
+        columns={
+            date_column: "date",
+            **{column: f"n{index}" for index, column in enumerate(number_columns, 1)},
+            "etoile_1": "s1",
+            "etoile_2": "s2",
+        }
+    )
+
+    df["date"] = pd.to_datetime(
+        df["date"],
+        format="%d/%m/%Y",
+        errors="coerce",
+    )
+
+    if df["date"].isna().any():
+        raise ValueError("Le CSV contient des dates invalides.")
+
+    value_columns = [f"n{i}" for i in range(1, 6)] + ["s1", "s2"]
+
+    for column in value_columns:
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce",
+        )
+
+    if df[value_columns].isna().any().any():
+        raise ValueError("Le CSV contient des valeurs numériques invalides.")
+
+    for line_number, (_, row) in enumerate(df.iterrows(), start=2):
+        numbers = [int(row[f"n{i}"]) for i in range(1, 6)]
+        stars = [int(row[f"s{i}"]) for i in range(1, 3)]
+
+        if len(set(numbers)) != 5:
+            raise ValueError(f"Numéros en doublon ligne {line_number}.")
+
+        if not all(1 <= number <= 50 for number in numbers):
+            raise ValueError(f"Numéro hors limites ligne {line_number}.")
+
+        if len(set(stars)) != 2:
+            raise ValueError(f"Étoiles en doublon ligne {line_number}.")
+
+        if not all(1 <= star <= 12 for star in stars):
+            raise ValueError(f"Étoile hors limites ligne {line_number}.")
+
+    df = (
+        df
+        .sort_values("date")
+        .drop_duplicates("date", keep="last")
+        .reset_index(drop=True)
+    )
+
+    df["draw_index"] = np.arange(len(df))
     return df
 
 
-def build_long_table(
-    df_draws: pd.DataFrame, pool_size: int, entity_type: str
-) -> pd.DataFrame:
-    records = []
-    cols_to_check = (
-        [f"n{i}" for i in range(1, 6)]
-        if entity_type == "number"
-        else [f"s{i}" for i in range(1, 3)]
-    )
-    history_appearances = {entity: [] for entity in range(1, pool_size + 1)}
+def _columns(entity_type: str) -> list[str]:
+    if entity_type == "number":
+        return [f"n{i}" for i in range(1, 6)]
+    if entity_type == "star":
+        return ["s1", "s2"]
+    raise ValueError(f"Type inconnu : {entity_type}")
 
-    for idx, row in df_draws.iterrows():
-        winning_entities = set(
-            row[col] for col in cols_to_check if col in row and pd.notna(row[col])
+
+def _features_for_state(
+    history: pd.DataFrame,
+    pool_size: int,
+    entity_type: str,
+) -> pd.DataFrame:
+    """Construit les caractéristiques après l'historique fourni."""
+    columns = _columns(entity_type)
+    draw_index = len(history)
+    appearances = {entity: [] for entity in range(1, pool_size + 1)}
+
+    for index, (_, row) in enumerate(history.iterrows()):
+        for column in columns:
+            entity = int(row[column])
+            if entity in appearances:
+                appearances[entity].append(index)
+
+    rows = []
+
+    for entity in range(1, pool_size + 1):
+        positions = appearances[entity]
+
+        row = {
+            "entity_id": entity,
+            "draw_index": draw_index,
+            "delay": (draw_index - positions[-1] if positions else draw_index + 1),
+            "freq_all": len(positions),
+        }
+
+        for window in (5, 10, 25, 50):
+            row[f"freq_{window}"] = sum(
+                draw_index - position <= window for position in positions
+            )
+
+        row["recent_weighted"] = sum(
+            np.exp(-(draw_index - position) / 20.0) for position in positions
         )
 
-        for entity_id in range(1, pool_size + 1):
-            is_win = 1 if entity_id in winning_entities else 0
-            if history_appearances[entity_id]:
-                delay = idx - history_appearances[entity_id][-1]
-            else:
-                delay = idx + 1
+        rows.append(row)
 
-            past_draws = history_appearances[entity_id]
-            freq_10 = sum(1 for p in past_draws if idx - p <= 10)
-            freq_50 = sum(1 for p in past_draws if idx - p <= 50)
-            freq_all = len(past_draws)
-
-            records.append({
-                "draw_idx": row["draw_idx"],
-                "date": row["date"],
-                "entity_id": entity_id,
-                "label": is_win,
-                "entity_feat": entity_id,
-                "delay": delay,
-                "freq_10": freq_10,
-                "freq_50": freq_50,
-                "freq_all": freq_all,
-            })
-            if is_win:
-                history_appearances[entity_id].append(idx)
-
-    return pd.DataFrame(records)
+    return pd.DataFrame(rows, columns=FEATURES)
 
 
-# =====================================================================
-# 3. ENSEMBLE TRI-MODÈLES
-# =====================================================================
+def build_long_table(
+    df_draws: pd.DataFrame,
+    pool_size: int,
+    entity_type: str,
+) -> pd.DataFrame:
+    """
+    Construit les exemples d'apprentissage.
+
+    Les caractéristiques du tirage i utilisent uniquement les tirages
+    précédant i.
+    """
+    columns = _columns(entity_type)
+    rows = []
+
+    for target_index in range(1, len(df_draws)):
+        history = df_draws.iloc[:target_index]
+        features = _features_for_state(
+            history,
+            pool_size,
+            entity_type,
+        )
+
+        target = df_draws.iloc[target_index]
+        winners = {int(target[column]) for column in columns}
+
+        features["label"] = features["entity_id"].isin(winners).astype(int)
+        features["target_index"] = target_index
+        rows.append(features)
+
+    if not rows:
+        return pd.DataFrame(columns=FEATURES + ["label", "target_index"])
+
+    return pd.concat(rows, ignore_index=True)
 
 
-def _train_ranker_ensemble(long_df, windows, ranker_params):
-    train_idx = long_df["draw_idx"] < long_df["draw_idx"].max() - windows
-    val_idx = long_df["draw_idx"] >= long_df["draw_idx"].max() - windows
-
-    X = long_df.drop(columns=["draw_idx", "date", "entity_id", "label"])
-    y = long_df["label"].values
-
-    Xtr, ytr = X[train_idx], y[train_idx]
-    Xval, yval = X[val_idx], y[val_idx]
-
-    gtr = long_df[train_idx].groupby("draw_idx").size().values
-    gval = long_df[val_idx].groupby("draw_idx").size().values
-
-    lgb_model = lgb.LGBMRanker(**ranker_params)
-    lgb_model.fit(
-        Xtr,
-        ytr,
-        group=gtr,
-        eval_set=[(Xval, yval)],
-        eval_group=[gval],
-        callbacks=[lgb.early_stopping(30, verbose=False)],
-    )
-
-    def _sizes_to_ids(sizes):
-        ids = []
-        for i, s in enumerate(sizes):
-            ids.extend([i] * s)
-        return np.array(ids)
-
-    cb_train_group = _sizes_to_ids(gtr)
-    cb_val_group = _sizes_to_ids(gval)
-
-    train_pool = cb.Pool(data=Xtr, label=ytr, group_id=cb_train_group)
-    val_pool = cb.Pool(data=Xval, label=yval, group_id=cb_val_group)
-
-    cb_model = cb.CatBoostRanker(
-        iterations=200,
-        learning_rate=0.03,
-        depth=4,
-        loss_function="YetiRank",
-        verbose=False,
-    )
-    cb_model.fit(train_pool, eval_set=val_pool, early_stopping_rounds=30)
-
-    xgb_model = xgb.XGBRanker(
-        objective="rank:ndcg",
-        learning_rate=0.03,
-        n_estimators=200,
-        max_depth=4,
-        random_state=42,
-    )
-    xgb_model.fit(
-        Xtr, ytr, group=gtr, eval_set=[(Xval, yval)], eval_group=[gval], verbose=False
-    )
-
-    return lgb_model, cb_model, xgb_model
-
-
-def _predict_ensemble_fused(lgb_model, cb_model, xgb_model, X_test):
-    pred_lgb = lgb_model.predict(X_test)
-    pred_cb = cb_model.predict(X_test)
-    pred_xgb = xgb_model.predict(X_test)
-
-    def normalize(arr):
-        if arr.max() == arr.min():
-            return arr
-        return (arr - arr.min()) / (arr.max() - arr.min())
-
-    return (
-        (0.40 * normalize(pred_lgb))
-        + (0.35 * normalize(pred_cb))
-        + (0.25 * normalize(pred_xgb))
+def build_next_draw_features(
+    df_draws: pd.DataFrame,
+    pool_size: int,
+    entity_type: str,
+) -> pd.DataFrame:
+    return _features_for_state(
+        df_draws,
+        pool_size,
+        entity_type,
     )
 
 
-def _build_combined_grid(grids, number_scores, star_scores):
-    """Construit une grille en choisissant le meilleur candidat de chaque colonne."""
+def train_entity_model(
+    training_table: pd.DataFrame,
+    cfg,
+) -> CatBoostClassifier:
+    if training_table.empty:
+        raise ValueError("Table d'apprentissage vide.")
 
-    def select_by_column(values_key, scores, column_count):
-        selected = []
-        used_values = set()
+    # Limite de sécurité pour accélérer le backtest.
+    max_rows = 30_000
+    if len(training_table) > max_rows:
+        training_table = training_table.tail(max_rows)
 
-        for column_index in range(column_count):
-            candidates = [
-                (
-                    scores.get(grid[values_key][column_index], 0.0),
-                    grid[values_key][column_index],
-                    grid_index,
-                )
-                for grid_index, grid in enumerate(grids)
-                if grid[values_key][column_index] not in used_values
-            ]
-            if not candidates:
-                break
+    model = CatBoostClassifier(**cfg.catboost_params)
 
-            _, value, grid_index = max(
-                candidates, key=lambda candidate: (candidate[0], -candidate[1])
-            )
-            selected.append(value)
-            used_values.add(value)
+    model.fit(
+        training_table[FEATURES],
+        training_table["label"],
+    )
 
-        return selected
+    return model
 
-    combined_numbers = select_by_column("nums", number_scores, 5)
-    combined_stars = select_by_column("stars", star_scores, 2)
+
+def predict_entity_probabilities(
+    model: CatBoostClassifier,
+    features: pd.DataFrame,
+    pool_size: int,
+) -> dict[int, float]:
+    probabilities = model.predict_proba(features[FEATURES])[:, 1]
+
+    # Mélange prudent : 80 % prédiction ML, 20 % uniforme.
+    probabilities = np.asarray(probabilities, dtype=float)
+    probabilities = np.nan_to_num(
+        probabilities,
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+
+    probabilities += 0.20 / pool_size
+    total = probabilities.sum()
+
+    if total <= 0:
+        probabilities = np.full(pool_size, 1.0 / pool_size)
+    else:
+        probabilities /= total
 
     return {
-        "nums": sorted(set(combined_numbers)),
-        "stars": sorted(set(combined_stars)),
-        "score": sum(number_scores.get(number, 0.0) for number in combined_numbers)
-        + sum(star_scores.get(star, 0.0) for star in combined_stars),
+        int(entity): float(probability)
+        for entity, probability in zip(
+            features["entity_id"],
+            probabilities,
+        )
     }
 
 
-# =====================================================================
-# 4. BACKTEST ET PIPELINE PRINCIPAL
-# =====================================================================
+def train_and_predict(
+    history: pd.DataFrame,
+    cfg,
+) -> tuple[dict[int, float], dict[int, float]]:
+    print(
+        f"Construction des données numéros ({len(history)} tirages)...",
+        flush=True,
+    )
+
+    number_table = build_long_table(
+        history,
+        cfg.pool_numbers,
+        "number",
+    )
+
+    print(
+        f"Apprentissage CatBoost numéros ({len(number_table)} lignes)...",
+        flush=True,
+    )
+
+    number_model = train_entity_model(
+        number_table,
+        cfg,
+    )
+
+    print(
+        "Construction des données étoiles...",
+        flush=True,
+    )
+
+    star_table = build_long_table(
+        history,
+        cfg.pool_stars,
+        "star",
+    )
+
+    print(
+        f"Apprentissage CatBoost étoiles ({len(star_table)} lignes)...",
+        flush=True,
+    )
+
+    star_model = train_entity_model(
+        star_table,
+        cfg,
+    )
+
+    number_features = build_next_draw_features(
+        history,
+        cfg.pool_numbers,
+        "number",
+    )
+    star_features = build_next_draw_features(
+        history,
+        cfg.pool_stars,
+        "star",
+    )
+
+    return (
+        predict_entity_probabilities(
+            number_model,
+            number_features,
+            cfg.pool_numbers,
+        ),
+        predict_entity_probabilities(
+            star_model,
+            star_features,
+            cfg.pool_stars,
+        ),
+    )
 
 
-def backtest(df_draws: pd.DataFrame, cfg, out_dir: str):
-    print("📊 Lancement du Backtesting Réel Dynamique...")
+def generate_ticket(
+    number_probabilities: dict[int, float],
+    star_probabilities: dict[int, float],
+    rng: np.random.Generator,
+) -> dict:
+    numbers = np.array(list(number_probabilities))
+    stars = np.array(list(star_probabilities))
+
+    number_weights = np.array(
+        list(number_probabilities.values()),
+        dtype=float,
+    )
+    star_weights = np.array(
+        list(star_probabilities.values()),
+        dtype=float,
+    )
+
+    number_weights /= number_weights.sum()
+    star_weights /= star_weights.sum()
+
+    selected_numbers = sorted(
+        rng.choice(
+            numbers,
+            5,
+            replace=False,
+            p=number_weights,
+        ).tolist()
+    )
+
+    selected_stars = sorted(
+        rng.choice(
+            stars,
+            2,
+            replace=False,
+            p=star_weights,
+        ).tolist()
+    )
+
+    return {
+        "nums": selected_numbers,
+        "stars": selected_stars,
+        "score": sum(number_probabilities[number] for number in selected_numbers),
+    }
+
+
+def build_combined_grid(
+    grids: list[dict],
+    number_probabilities: dict[int, float],
+    star_probabilities: dict[int, float],
+) -> dict:
+    number_counts = {number: 0 for number in number_probabilities}
+    star_counts = {star: 0 for star in star_probabilities}
+
+    for grid in grids:
+        for number in grid["nums"]:
+            number_counts[number] += 1
+        for star in grid["stars"]:
+            star_counts[star] += 1
+
+    numbers = sorted(
+        number_probabilities,
+        key=lambda value: (
+            number_counts[value],
+            number_probabilities[value],
+        ),
+        reverse=True,
+    )[:5]
+
+    stars = sorted(
+        star_probabilities,
+        key=lambda value: (
+            star_counts[value],
+            star_probabilities[value],
+        ),
+        reverse=True,
+    )[:2]
+
+    return {
+        "nums": sorted(numbers),
+        "stars": sorted(stars),
+        "score": 0.0,
+    }
+
+
+def backtest(
+    df_draws: pd.DataFrame,
+    cfg,
+    out_dir: str,
+) -> dict:
+    """Évalue les 20 derniers tirages de l'année précédente."""
+    minimum = max(cfg.min_history_draws, 30)
+
+    if len(df_draws) <= minimum:
+        return {
+            "draws": 0,
+            "spent": 0.0,
+            "gains": 0.0,
+            "net_balance": 0.0,
+            "number_hits": 0,
+            "star_hits": 0,
+        }
+
+    last_date = df_draws["date"].max()
+    first_date = last_date - pd.Timedelta(days=cfg.backtest_days)
+
+    candidate_indices = [
+        index
+        for index, date in enumerate(df_draws["date"])
+        if first_date < date <= last_date and index >= minimum
+    ]
+
+    if not candidate_indices:
+        return {
+            "draws": 0,
+            "spent": 0.0,
+            "gains": 0.0,
+            "net_balance": 0.0,
+            "number_hits": 0,
+            "star_hits": 0,
+        }
+
+    # Les 20 tirages les plus récents de la période sélectionnée.
+    target_indices = candidate_indices[-cfg.n_splits_backtest :]
+
     total_spent = 0.0
     total_gains = 0.0
-    splits_count = 20
-    ticket_cost = 2.50
-    grilles_per_draw = TOTAL_TICKETS
+    number_hits = 0
+    star_hits = 0
 
-    max_idx = df_draws["draw_idx"].max()
-    num_params = getattr(cfg, "lgb_ranker_params", None)
-    if num_params is None:
-        num_params = getattr(cfg, "lgb_ranker_params_numbers", {})
+    print(
+        f"📊 Backtest sur {len(target_indices)} tirages "
+        f"entre {first_date.date()} et {last_date.date()}",
+        flush=True,
+    )
 
-    for i in tqdm(range(splits_count), desc="Backtest ML"):
-        total_spent += ticket_cost * grilles_per_draw
-        target_draw_idx = max_idx - (splits_count - i)
-        if target_draw_idx < 30:
-            continue
-
-        sub_df = df_draws[df_draws["draw_idx"] <= target_draw_idx].copy()
-        actual_row = df_draws[df_draws["draw_idx"] == target_draw_idx]
-        if actual_row.empty:
-            continue
-
-        actual_nums = set(
-            actual_row.iloc[0][f"n{j}"]
-            for j in range(1, 6)
-            if pd.notna(actual_row.iloc[0][f"n{j}"])
-        )
-        actual_stars = set(
-            actual_row.iloc[0][f"s{j}"]
-            for j in range(1, 3)
-            if pd.notna(actual_row.iloc[0][f"s{j}"])
+    for position, target_index in enumerate(
+        tqdm(
+            target_indices,
+            desc="Backtest année précédente",
+            total=len(target_indices),
+        ),
+        start=1,
+    ):
+        history_start = max(
+            0,
+            target_index - cfg.backtest_training_draws,
         )
 
-        long_num_sub = build_long_table(sub_df, cfg.pool_numbers, "number")
-        train_idx = long_num_sub["draw_idx"] < target_draw_idx - 5
-        val_idx = long_num_sub["draw_idx"] >= target_draw_idx - 5
+        history = df_draws.iloc[history_start:target_index].copy()
 
-        if train_idx.sum() > 0 and val_idx.sum() > 0:
-            X = long_num_sub.drop(columns=["draw_idx", "date", "entity_id", "label"])
-            y = long_num_sub["label"].values
-            gtr = long_num_sub[train_idx].groupby("draw_idx").size().values
-            gval = long_num_sub[val_idx].groupby("draw_idx").size().values
+        actual = df_draws.iloc[target_index]
 
-            try:
-                lgb_model = lgb.LGBMRanker(**num_params)
-                lgb_model.fit(
-                    X[train_idx],
-                    y[train_idx],
-                    group=gtr,
-                    eval_set=[(X[val_idx], y[val_idx])],
-                    eval_group=[gval],
-                    callbacks=[lgb.early_stopping(15, verbose=False)],
-                )
-                X_test_split = long_num_sub[
-                    long_num_sub["draw_idx"] == target_draw_idx
-                ].drop(columns=["draw_idx", "date", "entity_id", "label"])
-                preds = lgb_model.predict(X_test_split)
-                entities = long_num_sub[long_num_sub["draw_idx"] == target_draw_idx][
-                    "entity_id"
-                ].values
-                sorted_idx = np.argsort(preds)[::-1]
-                pred_top5 = sorted([int(entities[idx]) for idx in sorted_idx[:5]])
-            except Exception:
-                pred_top5 = [3, 12, 24, 38, 45]
-        else:
-            pred_top5 = [3, 12, 24, 38, 45]
+        print(
+            f"Entraînement {position}/{len(target_indices)} "
+            f"- historique utilisé : {len(history)} tirages",
+            flush=True,
+        )
 
-        split_gains = 0.0
-        all_pool_nums = list(range(1, 51))
-        for ticket_id in range(1, grilles_per_draw + 1):
-            np.random.seed(42 + ticket_id + i)
-            selected_nums = sorted(
-                list(
-                    set(
-                        pred_top5[:2]
-                        + list(
-                            np.random.choice(
-                                [n for n in all_pool_nums if n not in pred_top5],
-                                3,
-                                replace=False,
-                            )
-                        )
-                    )
-                )
-            )
-            selected_stars = sorted(
-                list(np.random.choice(range(1, 13), 2, replace=False))
+        numbers, stars = train_and_predict(history, cfg)
+        rng = np.random.default_rng(1000 + target_index)
+
+        actual_numbers = {int(actual[f"n{i}"]) for i in range(1, 6)}
+        actual_stars = {int(actual[f"s{i}"]) for i in range(1, 3)}
+
+        for _ in range(cfg.backtest_tickets_per_draw):
+            ticket = generate_ticket(numbers, stars, rng)
+
+            matched_numbers = len(actual_numbers & set(ticket["nums"]))
+            matched_stars = len(actual_stars & set(ticket["stars"]))
+
+            number_hits += matched_numbers
+            star_hits += matched_stars
+
+            total_gains += compute_official_euromillions_payout(
+                matched_numbers,
+                matched_stars,
             )
 
-            matched_n = len(actual_nums.intersection(selected_nums))
-            matched_s = len(actual_stars.intersection(selected_stars))
-            split_gains += compute_official_euromillions_payout(matched_n, matched_s)
+        total_spent += 2.50 * cfg.backtest_tickets_per_draw
 
-        total_gains += split_gains
+    return {
+        "draws": len(target_indices),
+        "period_start": str(first_date.date()),
+        "period_end": str(last_date.date()),
+        "spent": total_spent,
+        "gains": total_gains,
+        "net_balance": total_gains - total_spent,
+        "number_hits": number_hits,
+        "star_hits": star_hits,
+    }
 
-    net_balance = total_gains - total_spent
-    print(f"\n💰 Bilan Financier Officiel du Backtest : Net = {net_balance:.2f} €\n")
 
+def run_pipeline(
+    csv_path: str,
+    out_dir: str,
+    cfg,
+) -> dict:
+    output_path = Path(out_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
 
-def run_pipeline(csv_path: str, out_dir: str, cfg) -> dict:
-    Path(out_dir).mkdir(parents=True, exist_ok=True)
     df_draws = load_draws(csv_path)
 
-    backtest(df_draws, cfg, out_dir)
+    if len(df_draws) < cfg.min_history_draws:
+        raise ValueError(f"Il faut au moins {cfg.min_history_draws} tirages.")
 
-    # 1. Entraînement Modèle Numéros (1 à 50)
-    long_num = build_long_table(df_draws, cfg.pool_numbers, "number")
-    num_params = getattr(cfg, "lgb_ranker_params", None)
-    if num_params is None:
-        num_params = getattr(cfg, "lgb_ranker_params_numbers", {})
-
-    lgb_n, cb_n, xgb_n = _train_ranker_ensemble(
-        long_num, windows=30, ranker_params=num_params
+    backtest_result = backtest(
+        df_draws,
+        cfg,
+        out_dir,
     )
 
-    latest_draw_idx = df_draws["draw_idx"].max()
-    X_pred_num = long_num[long_num["draw_idx"] == latest_draw_idx].drop(
-        columns=["draw_idx", "date", "entity_id", "label"]
+    number_probabilities, star_probabilities = train_and_predict(
+        df_draws,
+        cfg,
     )
 
-    if not X_pred_num.empty:
-        scores_num = _predict_ensemble_fused(lgb_n, cb_n, xgb_n, X_pred_num)
-        entities = long_num[long_num["draw_idx"] == latest_draw_idx]["entity_id"].values
-        entity_score_map = {
-            int(ent): float(scr) for ent, scr in zip(entities, scores_num)
-        }
-        sorted_entities = sorted(
-            entity_score_map.keys(), key=lambda x: entity_score_map[x], reverse=True
-        )
-        top5_numbers = sorted(sorted_entities[:5])
-    else:
-        entity_score_map = {n: 1.0 for n in range(1, 51)}
-        sorted_entities = list(range(1, 51))
-        top5_numbers = [3, 12, 24, 38, 45]
-
-    # 2. Entraînement Modèle Étoiles (1 à 12)
-    long_star = build_long_table(df_draws, cfg.pool_stars, "star")
-    star_params = {
-        "objective": "lambdarank",
-        "metric": "ndcg",
-        "learning_rate": 0.03,
-        "n_estimators": 100,
-        "max_depth": 3,
-        "random_state": 42,
-        "verbose": -1,
-    }
-    try:
-        lgb_s, cb_s, xgb_s = _train_ranker_ensemble(
-            long_star, windows=30, ranker_params=star_params
-        )
-        X_pred_star = long_star[long_star["draw_idx"] == latest_draw_idx].drop(
-            columns=["draw_idx", "date", "entity_id", "label"]
-        )
-        scores_star = _predict_ensemble_fused(lgb_s, cb_s, xgb_s, X_pred_star)
-        star_entities = long_star[long_star["draw_idx"] == latest_draw_idx][
-            "entity_id"
-        ].values
-        star_score_map = {
-            int(ent): float(scr) for ent, scr in zip(star_entities, scores_star)
-        }
-        sorted_stars_ent = sorted(
-            star_score_map.keys(), key=lambda x: star_score_map[x], reverse=True
-        )
-        top2_stars = sorted(sorted_stars_ent[:2])
-    except Exception:
-        star_score_map = {s: 1.0 for s in range(1, 13)}
-        sorted_stars_ent = list(range(1, 13))
-        top2_stars = [4, 8]
-
-    # =====================================================================
-    # 3. APPROCHE MONTE CARLO : GRILLES CANDIDATES + SÉLECTION GREEDY MAX-COVERAGE
-    # =====================================================================
     print(
-        f"🎲 Génération de 200 grilles candidates (Monte Carlo) et sélection de "
-        f"{GENERATED_TICKETS} grilles + 1 grille combinée..."
+        "✅ Entraînement final terminé. Génération des grilles...",
+        flush=True,
     )
 
-    candidate_pool = []
-    np.random.seed(999)
-
-    # On pondère la probabilité de tirage par le score IA pour que les meilleurs numéros apparaissent plus souvent
-    nums_list = list(entity_score_map.keys())
-    raw_weights = np.array([max(0.001, entity_score_map[n]) for n in nums_list])
-    prob_nums = raw_weights / raw_weights.sum()
-
-    stars_list = list(star_score_map.keys())
-    raw_star_weights = np.array([max(0.001, star_score_map[s]) for s in stars_list])
-    prob_stars = raw_star_weights / raw_star_weights.sum()
-
-    # Génération de 200 grilles candidates pondérées par l'IA
-    for _ in range(200):
-        # 5 numéros pondérés par l'IA, sans doublon
-        cand_nums = sorted(
-            list(np.random.choice(nums_list, size=5, replace=False, p=prob_nums))
-        )
-        # 2 étoiles pondérées par l'IA, sans doublon
-        cand_stars = sorted(
-            list(np.random.choice(stars_list, size=2, replace=False, p=prob_stars))
-        )
-
-        # Calcul du score global de la grille (somme des scores IA des numéros + étoiles)
-        grid_score = sum(entity_score_map[n] for n in cand_nums) + sum(
-            star_score_map[s] for s in cand_stars
-        )
-
-        # Filtre géométrique optionnel (éviter les suites trop serrées ou déséquilibres extrêmes)
-        # On pénalise légèrement si 3 numéros consécutifs ou plus
-        consecutive_penalty = 0
-        for i in range(len(cand_nums) - 2):
-            if cand_nums[i + 2] - cand_nums[i] == 2:
-                consecutive_penalty += 0.2
-
-        final_grid_score = grid_score - consecutive_penalty
-
-        candidate_pool.append({
-            "nums": cand_nums,
-            "stars": cand_stars,
-            "score": final_grid_score,
-        })
-
-    # Sélection Greedy Max-Coverage (Sélection des N grilles les plus performantes et complémentaires)
-    selected_grids = []
-    covered_numbers = set()
-
-    # Tri des candidats par score IA décroissant
-    candidate_pool.sort(key=lambda x: x["score"], reverse=True)
-
-    for _ in range(GENERATED_TICKETS):
-        if not candidate_pool:
-            break
-
-        if not selected_grids:
-            # La première grille est la meilleure absolue selon l'IA
-            best_cand = candidate_pool.pop(0)
-        else:
-            # Pour les grilles suivantes, on cherche un compromis entre score élevé et nouveauté (couverture maximale)
-            best_idx = 0
-            best_metric = -999999
-
-            for idx, cand in enumerate(
-                candidate_pool[:50]
-            ):  # on analyse le top 50 restant
-                # Nombre de nouveaux numéros apportés par cette grille
-                new_nums_count = len(set(cand["nums"]) - covered_numbers)
-                # Métrique combinée : score IA + bonus de diversité
-                metric = cand["score"] + (new_nums_count * 0.5)
-                if metric > best_metric:
-                    best_metric = metric
-                    best_idx = idx
-
-            best_cand = candidate_pool.pop(best_idx)
-
-        selected_grids.append(best_cand)
-        for n in best_cand["nums"]:
-            covered_numbers.add(n)
-
-    # La sixième grille reprend les numéros et étoiles les plus représentés
-    # dans les cinq grilles, avec les scores IA pour départager les égalités.
-    selected_grids.append(
-        _build_combined_grid(selected_grids, entity_score_map, star_score_map)
+    top5_numbers = sorted(
+        sorted(
+            number_probabilities,
+            key=number_probabilities.get,
+            reverse=True,
+        )[:5]
     )
 
-    # Construction du DataFrame final pour le fichier CSV
-    portfolio_data = []
-    for ticket_id, grid in enumerate(selected_grids, start=1):
-        portfolio_data.append({
-            "ticket": ticket_id,
+    top2_stars = sorted(
+        sorted(
+            star_probabilities,
+            key=star_probabilities.get,
+            reverse=True,
+        )[:2]
+    )
+
+    rng = np.random.default_rng(2026)
+    grids = []
+
+    for _ in range(cfg.generated_tickets):
+        grids.append(
+            generate_ticket(
+                number_probabilities,
+                star_probabilities,
+                rng,
+            )
+        )
+
+    grids.append(
+        build_combined_grid(
+            grids,
+            number_probabilities,
+            star_probabilities,
+        )
+    )
+
+    portfolio = []
+
+    for ticket, grid in enumerate(grids, start=1):
+        portfolio.append({
+            "ticket": ticket,
             "n1": grid["nums"][0],
             "n2": grid["nums"][1],
             "n3": grid["nums"][2],
@@ -591,12 +624,27 @@ def run_pipeline(csv_path: str, out_dir: str, cfg) -> dict:
             "s2": grid["stars"][1],
         })
 
-    df_port = pd.DataFrame(portfolio_data)
-    portfolio_csv = os.path.join(out_dir, "portfolio_6_tickets.csv")
-    df_port.to_csv(portfolio_csv, index=False)
+    portfolio_path = output_path / "portfolio_6_tickets.csv"
+    pd.DataFrame(portfolio).to_csv(
+        portfolio_path,
+        index=False,
+    )
 
     return {
         "top5_numbers": top5_numbers,
         "top2_stars": top2_stars,
-        "portfolio_csv": portfolio_csv,
+        "portfolio_csv": str(portfolio_path),
+        "backtest": backtest_result,
     }
+
+    final_history = df_draws.tail(cfg.final_training_draws).reset_index(drop=True)
+
+    print(
+        f"✅ Backtest terminé. Entraînement final sur {len(final_history)} tirages...",
+        flush=True,
+    )
+
+    number_probabilities, star_probabilities = train_and_predict(
+        final_history,
+        cfg,
+    )

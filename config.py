@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -12,7 +12,16 @@ class Config:
     allow_older_regimes: bool = False
 
     # --- Backtest ---
-    n_splits_backtest: int = 20  # ➡️ Ajouté ici pour un pilotage centralisé
+    n_splits_backtest: int = 50  # ➡️ Ajouté ici pour un pilotage centralisé
+    backtest_days: int = 365
+    backtest_tickets_per_draw: int = 3
+
+    # Nombre de tirages utilisés pour chaque entraînement du backtest.
+    # 100 tirages représentent environ 1 à 2 années d'historique.
+    backtest_training_draws: int = 500
+
+    # Fenêtre utilisée pour l'entraînement final.
+    final_training_draws: int = 500
 
     # --- Cooccurrence / decay ---
     half_life_numbers: float = 60.0
@@ -37,6 +46,7 @@ class Config:
     sampling_alpha_numbers: float = 0.5
     sampling_alpha_stars: float = 0.5
     portfolio_max_attempts: int = 5000
+    generated_tickets: int = 5
 
     # --- LightGBM ranker (ML optimisé CPU) ---
     lgb_ranker_params_numbers: dict = None
@@ -52,13 +62,32 @@ class Config:
     ranker_weight_stars: float = 0.6
     classifier_weight_stars: float = 0.4
 
-    def __post_init__(self):
-        # ----------------------------------------------------------------------
-        # CONFIGURATION DES PARAMÈTRES LIGHTGBM (Optimisation Pure CPU Parallèle)
-        # ----------------------------------------------------------------------
+    # --- CatBoost ---
+    catboost_iterations: int = 120
+    catboost_depth: int = 5
+    catboost_learning_rate: float = 0.04
+    catboost_l2_leaf_reg: float = 8.0
+    catboost_random_seed: int = 42
 
-        # Ranker (Ordonnancement des numéros)
+    catboost_params: dict = field(init=False)
+
+    def __post_init__(self):
+        self.catboost_params = {
+            "iterations": self.catboost_iterations,
+            "depth": self.catboost_depth,
+            "learning_rate": self.catboost_learning_rate,
+            "l2_leaf_reg": self.catboost_l2_leaf_reg,
+            "loss_function": "Logloss",
+            "eval_metric": "Logloss",
+            "verbose": False,
+            "random_seed": self.catboost_random_seed,
+            "thread_count": -1,
+            "allow_writing_files": False,
+        }
+
+        # Configuration LightGBM existante
         self.lgb_ranker_params_numbers = {
+            # Ranker (Ordonnancement des numéros)
             "objective": "lambdarank",
             "metric": "ndcg",
             "learning_rate": 0.05,
