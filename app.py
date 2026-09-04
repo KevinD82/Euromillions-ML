@@ -2,6 +2,7 @@
 Application Web Streamlit - EuroMillions Pro IA
 """
 
+from html import escape
 from pathlib import Path
 
 import pandas as pd
@@ -68,24 +69,33 @@ if st.sidebar.button(
     with col1:
         st.subheader("Top 5 numéros appris")
 
-        top_numbers = results["top5_numbers"]
+        top_numbers_html = "".join(
+            f"<span class='top-number-ball'>{int(number)}</span>"
+            for number in results["top5_numbers"]
+        )
 
-        for position, number in enumerate(top_numbers, start=1):
-            st.write(f"**{position}.** {number}")
+        st.markdown(
+            f"<div class='top-draw'>{top_numbers_html}</div>",
+            unsafe_allow_html=True,
+        )
 
     with col2:
         st.subheader("Top 2 étoiles apprises")
 
-        top_stars = results["top2_stars"]
+        top_stars_html = "".join(
+            f"<span class='top-star-ball'>{int(star)}</span>"
+            for star in results["top2_stars"]
+        )
 
-        for position, star in enumerate(top_stars, start=1):
-            st.write(f"**{position}.** {star}")
+        st.markdown(
+            f"<div class='top-draw'>{top_stars_html}</div>",
+            unsafe_allow_html=True,
+        )
 
     st.subheader("🎟️ Portefeuille généré")
 
     portfolio = pd.read_csv(results["portfolio_csv"])
 
-    # Supprime un éventuel index enregistré dans un ancien CSV.
     unnamed_columns = [
         column for column in portfolio.columns if column.lower().startswith("unnamed:")
     ]
@@ -93,11 +103,131 @@ if st.sidebar.button(
     if unnamed_columns:
         portfolio = portfolio.drop(columns=unnamed_columns)
 
-    # L'index automatique Streamlit est masqué.
-    st.dataframe(
-        portfolio,
-        width="stretch",
-        hide_index=True,
+    column_labels = {
+        "ticket": "Ticket",
+        "n1": "Boule 1",
+        "n2": "Boule 2",
+        "n3": "Boule 3",
+        "n4": "Boule 4",
+        "n5": "Boule 5",
+        "s1": "Étoile 1",
+        "s2": "Étoile 2",
+    }
+
+    display_columns = [
+        "ticket",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "s1",
+        "s2",
+    ]
+
+    headers = "".join(
+        f"<th>{escape(column_labels[column])}</th>" for column in display_columns
+    )
+
+    rows_html = []
+
+    for _, row in portfolio.iterrows():
+        cells = [f"<td class='ticket-cell'>{int(row['ticket'])}</td>"]
+
+        for column in ["n1", "n2", "n3", "n4", "n5"]:
+            cells.append(
+                f"<td><span class='number-ball'>{int(row[column])}</span></td>"
+            )
+
+        for column in ["s1", "s2"]:
+            cells.append(f"<td><span class='star-ball'>{int(row[column])}</span></td>")
+
+        rows_html.append(f"<tr>{''.join(cells)}</tr>")
+
+    portfolio_html = f"""
+    <style>
+        .portfolio-wrapper {{
+            width: 100%;
+            overflow-x: auto;
+        }}
+
+        .portfolio-table {{
+            width: 100%;
+            border-collapse: collapse;
+            text-align: center;
+            font-size: 16px;
+        }}
+
+        .portfolio-table th {{
+            background-color: #f5f7fa;
+            color: #555;
+            padding: 12px 8px;
+            border-bottom: 1px solid #dfe3e8;
+            white-space: nowrap;
+        }}
+
+        .portfolio-table td {{
+            height: 76px;
+            padding: 8px;
+            border-bottom: 1px solid #e5e7eb;
+            text-align: center;
+            vertical-align: middle;
+        }}
+
+        .ticket-cell {{
+            font-weight: bold;
+            color: #555;
+        }}
+
+        .number-ball,
+        .star-ball {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 48px;
+            height: 48px;
+            color: white;
+            font-weight: bold;
+            font-size: 18px;
+        }}
+
+        .number-ball {{
+            border-radius: 50%;
+            background: #087caf;
+        }}
+
+        .star-ball {{
+            background: #fbb64b;
+            clip-path: polygon(
+                50% 0%,
+                61% 35%,
+                98% 35%,
+                68% 57%,
+                79% 95%,
+                50% 72%,
+                21% 95%,
+                32% 57%,
+                2% 35%,
+                39% 35%
+            );
+        }}
+    </style>
+
+    <div class="portfolio-wrapper">
+        <table class="portfolio-table">
+            <thead>
+                <tr>{headers}</tr>
+            </thead>
+            <tbody>
+                {"".join(rows_html)}
+            </tbody>
+        </table>
+    </div>
+    """
+
+    st.markdown(
+        portfolio_html,
+        unsafe_allow_html=True,
     )
 
     st.download_button(
@@ -150,6 +280,55 @@ if st.sidebar.button(
     st.caption(
         "Les gains du backtest sont indicatifs. Ils ne constituent pas "
         "une estimation fiable des gains futurs."
+    )
+
+    st.markdown(
+        """
+        <style>
+            .top-draw {
+                display: flex;
+                gap: 12px;
+                align-items: center;
+                flex-wrap: wrap;
+                margin-top: 12px;
+                margin-bottom: 20px;
+            }
+
+            .top-number-ball,
+            .top-star-ball {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 58px;
+                height: 58px;
+                color: white;
+                font-size: 22px;
+                font-weight: bold;
+            }
+
+            .top-number-ball {
+                border-radius: 50%;
+                background: #087caf;
+            }
+
+            .top-star-ball {
+                background: #fbb64b;
+                clip-path: polygon(
+                    50% 0%,
+                    61% 35%,
+                    98% 35%,
+                    68% 57%,
+                    79% 95%,
+                    50% 72%,
+                    21% 95%,
+                    32% 57%,
+                    2% 35%,
+                    39% 35%
+                );
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
 
 else:

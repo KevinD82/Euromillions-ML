@@ -24,7 +24,10 @@ FEATURES = [
     "recent_weighted",
 ]
 
-PAYOUTS = {
+CATEGORICAL_FEATURES = ["entity_id"]
+
+
+PAYOUTS: dict[tuple[int, int], float] = {
     (5, 2): 50_000_000.0,
     (5, 1): 250_000.0,
     (5, 0): 35_000.0,
@@ -45,7 +48,10 @@ def compute_official_euromillions_payout(
     matched_nums: int,
     matched_stars: int,
 ) -> float:
-    return PAYOUTS.get((matched_nums, matched_stars), 0.0)
+    return PAYOUTS.get(
+        (matched_nums, matched_stars),
+        0.0,
+    )
 
 
 def load_draws(csv_path: str | Path) -> pd.DataFrame:
@@ -160,7 +166,7 @@ def _features_for_state(
         positions = appearances[entity]
 
         row = {
-            "entity_id": entity,
+            "entity_id": str(entity),
             "draw_index": draw_index,
             "delay": (draw_index - positions[-1] if positions else draw_index + 1),
             "freq_all": len(positions),
@@ -203,9 +209,11 @@ def build_long_table(
         )
 
         target = df_draws.iloc[target_index]
-        winners = {int(target[column]) for column in columns}
 
-        features["label"] = features["entity_id"].isin(winners).astype(int)
+        winners = {str(int(target[column])) for column in columns}
+
+        features["label"] = features["entity_id"].astype(str).isin(winners).astype(int)
+
         features["target_index"] = target_index
         rows.append(features)
 
@@ -234,16 +242,23 @@ def train_entity_model(
     if training_table.empty:
         raise ValueError("Table d'apprentissage vide.")
 
-    # Limite de sécurité pour accélérer le backtest.
-    max_rows = 30_000
-    if len(training_table) > max_rows:
-        training_table = training_table.tail(max_rows)
+    training_table = training_table.copy()
+    training_table["entity_id"] = training_table["entity_id"].astype(str)
+
+    unique_labels = training_table["label"].nunique()
+
+    if unique_labels < 2:
+        raise ValueError(
+            "La table CatBoost ne contient qu'une seule classe. "
+            "Vérifiez la construction des labels."
+        )
 
     model = CatBoostClassifier(**cfg.catboost_params)
 
     model.fit(
         training_table[FEATURES],
         training_table["label"],
+        cat_features=CATEGORICAL_FEATURES,
     )
 
     return model
@@ -254,10 +269,11 @@ def predict_entity_probabilities(
     features: pd.DataFrame,
     pool_size: int,
 ) -> dict[int, float]:
+    features = features.copy()
+    features["entity_id"] = features["entity_id"].astype(str)
+
     probabilities = model.predict_proba(features[FEATURES])[:, 1]
 
-    # Mélange prudent : 80 % prédiction ML, 20 % uniforme.
-    probabilities = np.asarray(probabilities, dtype=float)
     probabilities = np.nan_to_num(
         probabilities,
         nan=0.0,
@@ -266,12 +282,7 @@ def predict_entity_probabilities(
     )
 
     probabilities += 0.20 / pool_size
-    total = probabilities.sum()
-
-    if total <= 0:
-        probabilities = np.full(pool_size, 1.0 / pool_size)
-    else:
-        probabilities /= total
+    probabilities /= probabilities.sum()
 
     return {
         int(entity): float(probability)
@@ -553,10 +564,31 @@ def run_pipeline(
     output_path = Path(out_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    df_draws = load_draws(csv_path)
+    df_all_draws = load_draws(csv_path)
+
+    model_start = pd.Timestamp(cfg.model_start_date)
+
+    df_draws = (
+        df_all_draws[df_all_draws["date"] >= model_start].copy().reset_index(drop=True)
+    )
+
+    df_draws["draw_index"] = np.arange(len(df_draws))
 
     if len(df_draws) < cfg.min_history_draws:
-        raise ValueError(f"Il faut au moins {cfg.min_history_draws} tirages.")
+        raise ValueError(
+            f"Il faut au moins {cfg.min_history_draws} tirages "
+            f"à partir du {model_start.strftime('%d/%m/%Y')}."
+        )
+
+    print(
+        f"📚 Historique total : {len(df_all_draws)} tirages",
+        flush=True,
+    )
+    print(
+        f"🤖 Historique utilisé par l'IA : {len(df_draws)} tirages "
+        f"depuis le {model_start.strftime('%d/%m/%Y')}",
+        flush=True,
+    )
 
     backtest_result = backtest(
         df_draws,
@@ -564,8 +596,15 @@ def run_pipeline(
         out_dir,
     )
 
+    final_history = df_draws.tail(cfg.final_training_draws).reset_index(drop=True)
+
+    print(
+        f"✅ Entraînement final sur {len(final_history)} tirages...",
+        flush=True,
+    )
+
     number_probabilities, star_probabilities = train_and_predict(
-        df_draws,
+        final_history,
         cfg,
     )
 
@@ -636,15 +675,3 @@ def run_pipeline(
         "portfolio_csv": str(portfolio_path),
         "backtest": backtest_result,
     }
-
-    final_history = df_draws.tail(cfg.final_training_draws).reset_index(drop=True)
-
-    print(
-        f"✅ Backtest terminé. Entraînement final sur {len(final_history)} tirages...",
-        flush=True,
-    )
-
-    number_probabilities, star_probabilities = train_and_predict(
-        final_history,
-        cfg,
-    )

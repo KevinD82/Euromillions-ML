@@ -6,6 +6,7 @@ Modèle (MVC) - Gestion de la base de données et scraping
 import datetime
 import os
 import re
+from datetime import timezone
 
 import pandas as pd
 import requests
@@ -43,11 +44,11 @@ class DataManager:
                 month = months_fr.get(month_str)
 
                 # Récupération dynamique de l'année en cours
-                year = str(datetime.datetime.now().year)
+                year = str(datetime.now(timezone.utc).year)
 
                 if month:
                     return f"{day}/{month}/{year}"
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
         return None
 
@@ -101,7 +102,7 @@ class DataManager:
                             "etoile_2": stars[1],
                             "fichier_source": "lesbonsnumeros_live",
                         })
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             print(f"❌ Erreur lors du scraping : {e}")
 
         return scraped_draws

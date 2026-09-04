@@ -7,20 +7,18 @@ class Config:
     pool_numbers: int = 50
     pool_stars: int = 12
 
+    # --- Régime actuel : 12 étoiles ---
+    model_start_date: str = "2016-09-27"
+
     # --- History ---
     min_history_draws: int = 300
     allow_older_regimes: bool = False
 
     # --- Backtest ---
-    n_splits_backtest: int = 50  # ➡️ Ajouté ici pour un pilotage centralisé
+    n_splits_backtest: int = 20
     backtest_days: int = 365
     backtest_tickets_per_draw: int = 3
-
-    # Nombre de tirages utilisés pour chaque entraînement du backtest.
-    # 100 tirages représentent environ 1 à 2 années d'historique.
     backtest_training_draws: int = 500
-
-    # Fenêtre utilisée pour l'entraînement final.
     final_training_draws: int = 500
 
     # --- Cooccurrence / decay ---
@@ -63,7 +61,7 @@ class Config:
     classifier_weight_stars: float = 0.4
 
     # --- CatBoost ---
-    catboost_iterations: int = 120
+    catboost_iterations: int = 100
     catboost_depth: int = 5
     catboost_learning_rate: float = 0.04
     catboost_l2_leaf_reg: float = 8.0
