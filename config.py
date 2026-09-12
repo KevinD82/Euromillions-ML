@@ -11,15 +11,15 @@ class Config:
     model_start_date: str = "2016-09-27"
 
     # --- History ---
-    min_history_draws: int = 300
+    min_history_draws: int = 80
     allow_older_regimes: bool = False
 
     # --- Backtest ---
     n_splits_backtest: int = 20
     backtest_days: int = 365
     backtest_tickets_per_draw: int = 3
-    backtest_training_draws: int = 500
-    final_training_draws: int = 500
+    training_days: int = 365
+    recent_days: int = 30
 
     # --- Cooccurrence / decay ---
     half_life_numbers: float = 60.0

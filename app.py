@@ -10,7 +10,7 @@ import streamlit as st
 
 from config import Config
 from model.data_manager import DataManager
-from model.euromillions_pro_pipeline import run_pipeline
+from model.euromillions_pro_pipeline import load_draws, run_pipeline
 
 st.set_page_config(
     page_title="EuroMillions IA",
@@ -31,38 +31,96 @@ output_dir = st.sidebar.text_input("Dossier de sortie", "output")
 st.sidebar.header("⚙️ Paramètres")
 st.sidebar.write(f"Historique : `{csv_file.name}`")
 
-if st.sidebar.button(
+if not csv_file.exists():
+    st.error(f"Fichier introuvable : {csv_file}")
+    st.stop()
+
+with st.spinner("Vérification des nouveaux tirages..."):
+    try:
+        synchronization = DataManager(str(csv_file)).synchronize_database()
+        if synchronization.get("status") == "success":
+            st.sidebar.success(
+                f"{synchronization.get('added', 0)} nouveau(x) tirage(s) ajouté(s)."
+            )
+        elif synchronization.get("status") == "up_to_date":
+            st.sidebar.caption("Historique synchronisé avec lesbonsnumeros_live.")
+        else:
+            st.sidebar.warning(
+                f"Synchronisation indisponible : {synchronization.get('message', 'erreur inconnue')}"
+            )
+    except Exception as error:  # noqa: BLE001
+        st.sidebar.warning(f"Synchronisation ignorée : {error}")
+
+try:
+    available_draws = load_draws(csv_file)
+    last_history_date = available_draws["date"].max()
+    st.sidebar.success(
+        f"Dernier tirage chargé : {last_history_date.strftime('%d/%m/%Y')}"
+    )
+
+    earliest_target = pd.Timestamp(Config().model_start_date) + pd.Timedelta(
+        days=Config().training_days
+    )
+    target_dates = list(
+        available_draws.loc[
+            available_draws["date"] >= earliest_target,
+            "date",
+        ].sort_values(ascending=False)
+    )
+    next_draw_date = last_history_date + pd.Timedelta(days=3)
+    target_dates.insert(0, next_draw_date)
+
+    def target_label(value):
+        if value == next_draw_date:
+            return f"Prochain tirage ({value.strftime('%d/%m/%Y')})"
+        return value.strftime("Tirage du %d/%m/%Y")
+
+    selected_target_date = st.sidebar.selectbox(
+        "Date cible de la prédiction",
+        options=target_dates,
+        format_func=target_label,
+    )
+except Exception as error:  # noqa: BLE001
+    st.error(f"Impossible de charger l’historique : {error}")
+    st.stop()
+
+run_button = st.sidebar.button(
     "🚀 Entraîner le modèle et générer les grilles",
     type="primary",
-):
-    if not csv_file.exists():
-        st.error(f"Fichier introuvable : {csv_file}")
-        st.stop()
+)
+cache_file = (
+    Path(output_dir) / f"prediction_{selected_target_date.strftime('%Y-%m-%d')}.json"
+)
+has_cached_result = cache_file.exists()
 
-    with st.spinner("Synchronisation des tirages..."):
-        try:
-            manager = DataManager(str(csv_file))
-            synchronization = manager.synchronize_database()
-
-            if synchronization.get("status") == "success":
-                st.success(
-                    f"{synchronization.get('added', 0)} nouveau(x) tirage(s) ajouté(s)."
-                )
-        except Exception as error:  # noqa: BLE001
-            st.warning(f"Synchronisation ignorée : {error}")
-
-    with st.spinner("Entraînement CatBoost et backtest..."):
+if run_button or has_cached_result:
+    with st.spinner(
+        "Entraînement annuel et backtest..."
+        if run_button
+        else "Chargement du résultat sauvegardé..."
+    ):
         try:
             results = run_pipeline(
                 str(csv_file),
                 output_dir,
                 Config(),
+                target_date=selected_target_date.strftime("%Y-%m-%d"),
+                force=run_button,
             )
         except Exception as error:  # noqa: BLE001
             st.error(f"Erreur pendant le pipeline : {error}")
             st.stop()
 
-    st.success("✅ Modèle entraîné et grilles générées.")
+    if run_button:
+        st.success("✅ Modèle entraîné et grilles générées.")
+    else:
+        st.info("Résultat sauvegardé chargé : aucun nouveau backtest exécuté.")
+
+    st.caption(
+        f"Prédiction pour le {pd.Timestamp(results['target_date']).strftime('%d/%m/%Y')} · "
+        f"apprentissage du {pd.Timestamp(results['training_start']).strftime('%d/%m/%Y')} "
+        f"au {pd.Timestamp(results['training_end']).strftime('%d/%m/%Y')}"
+    )
 
     col1, col2 = st.columns(2)
 

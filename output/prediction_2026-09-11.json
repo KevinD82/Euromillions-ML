@@ -1,0 +1,38 @@
+{
+  "source_signature": {
+    "size": 105474,
+    "mtime_ns": 1789198429902124200,
+    "last_date": "2026-09-11",
+    "training_days": 365,
+    "recent_days": 30,
+    "generated_tickets": 5
+  },
+  "result": {
+    "top5_numbers": [
+      5,
+      13,
+      17,
+      27,
+      29
+    ],
+    "top2_stars": [
+      2,
+      5
+    ],
+    "portfolio_csv": "output\\portfolio_2026-09-11.csv",
+    "target_date": "2026-09-11",
+    "training_start": "2025-09-12",
+    "training_end": "2026-09-08",
+    "history_last_date": "2026-09-11",
+    "backtest": {
+      "draws": 20,
+      "period_start": "2025-09-11",
+      "period_end": "2026-09-11",
+      "spent": 150.0,
+      "gains": 34.0,
+      "net_balance": -116.0,
+      "number_hits": 34,
+      "star_hits": 22
+    }
+  }
+}

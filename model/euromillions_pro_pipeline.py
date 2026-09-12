@@ -5,6 +5,7 @@ Le modèle apprend uniquement à partir des tirages antérieurs à la cible.
 Aucune méthode ne peut garantir les numéros gagnants.
 """
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -17,11 +18,23 @@ FEATURES = [
     "draw_index",
     "delay",
     "freq_5",
+    "freq_2",
     "freq_10",
     "freq_25",
     "freq_50",
+    "freq_30d",
     "freq_all",
     "recent_weighted",
+    "present_last",
+    "present_previous",
+    "present_two_back",
+    "present_three_back",
+    "present_four_back",
+    "current_run",
+    "return_rate_1",
+    "return_rate_3",
+    "return_rate_4",
+    "return_rate_5",
 ]
 
 CATEGORICAL_FEATURES = ["entity_id"]
@@ -144,15 +157,44 @@ def _columns(entity_type: str) -> list[str]:
     raise ValueError(f"Type inconnu : {entity_type}")
 
 
+def _pattern_return_rate(
+    presence: np.ndarray,
+    base_rate: float,
+    pattern_length: int,
+) -> float:
+    if len(presence) <= pattern_length:
+        return base_rate
+
+    current_pattern = tuple(presence[-pattern_length:])
+    matching_next_values = [
+        int(presence[end + 1])
+        for end in range(pattern_length - 1, len(presence) - 1)
+        if tuple(presence[end - pattern_length + 1 : end + 1]) == current_pattern
+    ]
+
+    prior_weight = 3
+    return float(
+        (sum(matching_next_values) + prior_weight * base_rate)
+        / (len(matching_next_values) + prior_weight)
+    )
+
+
 def _features_for_state(
     history: pd.DataFrame,
     pool_size: int,
     entity_type: str,
+    recent_days: int = 30,
 ) -> pd.DataFrame:
     """Construit les caractéristiques après l'historique fourni."""
     columns = _columns(entity_type)
     draw_index = len(history)
     appearances = {entity: [] for entity in range(1, pool_size + 1)}
+    reference_date = history["date"].max() if not history.empty else None
+    recent_cutoff = (
+        reference_date - pd.Timedelta(days=recent_days)
+        if reference_date is not None
+        else None
+    )
 
     for index, (_, row) in enumerate(history.iterrows()):
         for column in columns:
@@ -160,22 +202,54 @@ def _features_for_state(
             if entity in appearances:
                 appearances[entity].append(index)
 
+    presence_by_entity = {
+        entity: np.isin(np.arange(draw_index), positions).astype(int)
+        for entity, positions in appearances.items()
+    }
+
     rows = []
 
     for entity in range(1, pool_size + 1):
         positions = appearances[entity]
+        presence = presence_by_entity[entity]
+        base_rate = float(presence.mean()) if draw_index else 0.0
+
+        current_run = 0
+        for value in reversed(presence):
+            if not value:
+                break
+            current_run += 1
 
         row = {
             "entity_id": str(entity),
             "draw_index": draw_index,
             "delay": (draw_index - positions[-1] if positions else draw_index + 1),
             "freq_all": len(positions),
+            "present_last": int(presence[-1]) if draw_index >= 1 else 0,
+            "present_previous": int(presence[-2]) if draw_index >= 2 else 0,
+            "present_two_back": int(presence[-3]) if draw_index >= 3 else 0,
+            "present_three_back": int(presence[-4]) if draw_index >= 4 else 0,
+            "present_four_back": int(presence[-5]) if draw_index >= 5 else 0,
+            "current_run": current_run,
+            "return_rate_1": _pattern_return_rate(presence, base_rate, 1),
+            "return_rate_3": _pattern_return_rate(presence, base_rate, 3),
+            "return_rate_4": _pattern_return_rate(presence, base_rate, 4),
+            "return_rate_5": _pattern_return_rate(presence, base_rate, 5),
         }
 
-        for window in (5, 10, 25, 50):
+        for window in (2, 5, 10, 25, 50):
             row[f"freq_{window}"] = sum(
                 draw_index - position <= window for position in positions
             )
+
+        row["freq_30d"] = (
+            sum(
+                history.iloc[position]["date"] >= recent_cutoff
+                for position in positions
+            )
+            if recent_cutoff is not None
+            else 0
+        )
 
         row["recent_weighted"] = sum(
             np.exp(-(draw_index - position) / 20.0) for position in positions
@@ -190,6 +264,7 @@ def build_long_table(
     df_draws: pd.DataFrame,
     pool_size: int,
     entity_type: str,
+    recent_days: int = 30,
 ) -> pd.DataFrame:
     """
     Construit les exemples d'apprentissage.
@@ -206,6 +281,7 @@ def build_long_table(
             history,
             pool_size,
             entity_type,
+            recent_days,
         )
 
         target = df_draws.iloc[target_index]
@@ -227,11 +303,13 @@ def build_next_draw_features(
     df_draws: pd.DataFrame,
     pool_size: int,
     entity_type: str,
+    recent_days: int = 30,
 ) -> pd.DataFrame:
     return _features_for_state(
         df_draws,
         pool_size,
         entity_type,
+        recent_days,
     )
 
 
@@ -306,6 +384,7 @@ def train_and_predict(
         history,
         cfg.pool_numbers,
         "number",
+        cfg.recent_days,
     )
 
     print(
@@ -327,6 +406,7 @@ def train_and_predict(
         history,
         cfg.pool_stars,
         "star",
+        cfg.recent_days,
     )
 
     print(
@@ -343,11 +423,13 @@ def train_and_predict(
         history,
         cfg.pool_numbers,
         "number",
+        cfg.recent_days,
     )
     star_features = build_next_draw_features(
         history,
         cfg.pool_stars,
         "star",
+        cfg.recent_days,
     )
 
     return (
@@ -507,14 +589,14 @@ def backtest(
         ),
         start=1,
     ):
-        history_start = max(
-            0,
-            target_index - cfg.backtest_training_draws,
-        )
-
-        history = df_draws.iloc[history_start:target_index].copy()
-
         actual = df_draws.iloc[target_index]
+        history = df_draws[
+            (df_draws["date"] < actual["date"])
+            & (
+                df_draws["date"]
+                >= actual["date"] - pd.Timedelta(days=cfg.training_days)
+            )
+        ].copy()
 
         print(
             f"Entraînement {position}/{len(target_indices)} "
@@ -560,6 +642,8 @@ def run_pipeline(
     csv_path: str,
     out_dir: str,
     cfg,
+    target_date: str | None = None,
+    force: bool = False,
 ) -> dict:
     output_path = Path(out_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -580,6 +664,34 @@ def run_pipeline(
             f"à partir du {model_start.strftime('%d/%m/%Y')}."
         )
 
+    if target_date is None:
+        target_timestamp = df_draws["date"].max() + pd.Timedelta(days=3)
+    else:
+        target_timestamp = pd.Timestamp(target_date)
+
+    target_key = target_timestamp.strftime("%Y-%m-%d")
+    cache_path = output_path / f"prediction_{target_key}.json"
+    source_stat = Path(csv_path).stat()
+    source_signature = {
+        "size": source_stat.st_size,
+        "mtime_ns": source_stat.st_mtime_ns,
+        "last_date": df_all_draws["date"].max().strftime("%Y-%m-%d"),
+        "training_days": cfg.training_days,
+        "recent_days": cfg.recent_days,
+        "generated_tickets": cfg.generated_tickets,
+        "pattern_features_version": 1,
+    }
+
+    if not force and cache_path.exists():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if cached.get("source_signature") == source_signature:
+                portfolio_path = Path(cached["result"]["portfolio_csv"])
+                if portfolio_path.exists():
+                    return cached["result"]
+        except (OSError, json.JSONDecodeError, KeyError):
+            pass
+
     print(
         f"📚 Historique total : {len(df_all_draws)} tirages",
         flush=True,
@@ -596,7 +708,16 @@ def run_pipeline(
         out_dir,
     )
 
-    final_history = df_draws.tail(cfg.final_training_draws).reset_index(drop=True)
+    final_history = df_draws[
+        (df_draws["date"] < target_timestamp)
+        & (df_draws["date"] >= target_timestamp - pd.Timedelta(days=cfg.training_days))
+    ].reset_index(drop=True)
+
+    if len(final_history) < cfg.min_history_draws:
+        raise ValueError(
+            f"La date cible {target_key} ne dispose que de {len(final_history)} "
+            f"tirages sur les {cfg.training_days} derniers jours."
+        )
 
     print(
         f"✅ Entraînement final sur {len(final_history)} tirages...",
@@ -663,15 +784,33 @@ def run_pipeline(
             "s2": grid["stars"][1],
         })
 
-    portfolio_path = output_path / "portfolio_6_tickets.csv"
+    portfolio_path = output_path / f"portfolio_{target_key}.csv"
     pd.DataFrame(portfolio).to_csv(
         portfolio_path,
         index=False,
     )
 
-    return {
+    result = {
         "top5_numbers": top5_numbers,
         "top2_stars": top2_stars,
         "portfolio_csv": str(portfolio_path),
+        "target_date": target_key,
+        "training_start": final_history["date"].min().strftime("%Y-%m-%d"),
+        "training_end": final_history["date"].max().strftime("%Y-%m-%d"),
+        "history_last_date": df_all_draws["date"].max().strftime("%Y-%m-%d"),
         "backtest": backtest_result,
     }
+
+    cache_path.write_text(
+        json.dumps(
+            {
+                "source_signature": source_signature,
+                "result": result,
+            },
+            ensure_ascii=True,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    return result

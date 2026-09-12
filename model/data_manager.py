@@ -3,10 +3,9 @@
 Modèle (MVC) - Gestion de la base de données et scraping
 """
 
-import datetime
 import os
 import re
-from datetime import timezone
+from datetime import datetime, timezone
 
 import pandas as pd
 import requests
@@ -37,14 +36,15 @@ class DataManager:
             text_cleaned = (
                 text_date.lower().replace("&nbsp;", " ").replace("\xa0", " ").strip()
             )
-            match = re.search(r"(\d{1,2})\s+([a-zéeûâoû]+)", text_cleaned)
+            match = re.search(
+                r"(\d{1,2})\s+([a-zà-ÿ]+)(?:\s+(\d{4}))?",
+                text_cleaned,
+            )
             if match:
                 day = f"{int(match.group(1)):02d}"
                 month_str = match.group(2)
                 month = months_fr.get(month_str)
-
-                # Récupération dynamique de l'année en cours
-                year = str(datetime.now(timezone.utc).year)
+                year = match.group(3) or str(datetime.now(timezone.utc).year)
 
                 if month:
                     return f"{day}/{month}/{year}"
@@ -143,10 +143,9 @@ class DataManager:
                 "last_date": df_local["date_de_tirage"].iloc[-1],
             }
 
-        df_new = pd.DataFrame(new_draws_to_add).iloc[::-1]
+        df_new = pd.DataFrame(new_draws_to_add)
         df_combined = pd.concat([df_local, df_new], ignore_index=True)
 
-        # ➡️ TRI CHRONOLOGIQUE AUTOMATIQUE (Option 1)
         df_combined["temp_date"] = pd.to_datetime(
             df_combined["date_de_tirage"], format="%d/%m/%Y", errors="coerce"
         )

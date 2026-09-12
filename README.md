@@ -16,6 +16,14 @@ Le pipeline:
 6. selectionne 5 grilles diversifiees avec une strategie de couverture;
 7. construit une 6e grille **combinee** a partir des colonnes des 5 grilles retenues.
 
+La prediction finale utilise les 365 jours precedant la date cible. Les variables
+incluent notamment la frequence sur les 30 derniers jours calendaires, afin de
+tenir compte de la tendance recente sans ignorer l'historique annuel.
+Le modele integre aussi les cinq derniers etats de presence de chaque boule,
+la longueur de sa serie actuelle et son taux historique de retour apres des
+motifs similaires. Ces indicateurs sont calcules uniquement avec les tirages
+anterieurs au tirage cible.
+
 ### Grille combinee
 
 La grille combinee reprend:
@@ -75,6 +83,11 @@ L'interface synchronise le CSV, execute le backtest, entraine les modeles et aff
 - 1 grille combinee;
 - les frequences historiques des numeros et des etoiles;
 - un bouton de telechargement du portefeuille.
+
+Elle affiche aussi la date du dernier tirage charge et permet de choisir une date
+cible dans un menu deroulant. Les resultats sont sauvegardes dans `output/` par
+date cible; une reouverture de la page relit le resultat sauvegarde au lieu de
+relancer le backtest. Le bouton d'entrainement force un nouveau calcul.
 
 ### Mode terminal
 
